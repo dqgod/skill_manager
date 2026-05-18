@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Skill Manager - 跨设备 Skill 管理</title>
+<style>
+:root {
+  --bg: #1e1e2e;
+  --bg2: #252536;
+  --bg3: #2d2d44;
+  --border: #3a3a55;
+  --text: #cdd6f4;
+  --text2: #a6adc8;
+  --text3: #6c7086;
+  --accent: #89b4fa;
+  --accent2: #74c7ec;
+  --green: #a6e3a1;
+  --yellow: #f9e2af;
+  --red: #f38ba8;
+  --orange: #fab387;
+  --purple: #cba6f7;
+  --shadow: 0 2px 8px rgba(0,0,0,0.3);
+  --radius: 8px;
+  --transition: 0.15s ease;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-size: 13px;
+}
+
+/* === Top Bar === */
+.topbar {
+  display: flex;
+  align-items: center;
+  height: 40px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  padding: 0 12px;
+  gap: 4px;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+.topbar .logo {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--accent);
+  margin-right: 12px;
+}
+.topbar .menu-btn {
+  -webkit-app-region: no-drag;
+  background: none; border: none; color: var(--text2);
+  padding: 4px 10px; border-radius: 4px; cursor: pointer;
+  font-size: 12px; font-family: inherit;
+}
+.topbar .menu-btn:hover { background: var(--bg3); color: var(--text); }
+.topbar .spacer { flex: 1; }
+.topbar .status-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--green);
+  margin-right: 6px;
+}
+.topbar .status-text { color: var(--text2); font-size: 11px; }
+
+/* === Main Layout === */
+.main {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* === Left Sidebar === */
+.sidebar {
+  width: 240px;
+  min-width: 240px;
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.sidebar-header {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.sidebar-header h3 { font-size: 12px; text-transform: uppercase; color: var(--text3); letter-spacing: 1px; }
+.sidebar-header .add-btn {
+  background: none; border: 1px solid var(--border); color: var(--text2);
+  width: 22px; height: 22px; border-radius: 4px; cursor: pointer;
+  font-size: 14px; display: flex; align-items: center; justify-content: center;
+}
+.sidebar-header .add-btn:hover { background: var(--bg3); color: var(--text); }
+.sidebar-nav { flex: 1; overflow-y: auto; padding: 4px 0; }
+.sidebar-nav .section-title {
+  padding: 8px 12px 4px;
+  font-size: 11px; color: var(--text3); text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.sidebar-nav .nav-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; cursor: pointer; transition: var(--transition);
+  border-left: 3px solid transparent; color: var(--text2);
+}
+.sidebar-nav .nav-item:hover { background: var(--bg3); color: var(--text); }
+.sidebar-nav .nav-item.active {
+  background: var(--bg3); color: var(--accent);
+  border-left-color: var(--accent);
+}
+.sidebar-nav .nav-item .icon { width: 18px; text-align: center; font-size: 14px; }
+.sidebar-nav .nav-item .badge {
+  margin-left: auto; background: var(--bg3); color: var(--text3);
+  font-size: 10px; padding: 1px 6px; border-radius: 10px;
+}
+.sidebar-nav .nav-item.active .badge { background: var(--accent); color: var(--bg); }
+
+.sidebar-footer {
+  padding: 8px 12px; border-top: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+}
+.sidebar-footer .device-indicator {
+  width: 8px; height: 8px; border-radius: 50%;
+}
+.sidebar-footer .device-indicator.online { background: var(--green); }
+.sidebar-footer .device-indicator.offline { background: var(--text3); }
+.sidebar-footer .device-name { color: var(--text2); font-size: 11px; flex: 1; }
+.sidebar-footer .device-count { color: var(--text3); font-size: 10px; }
+
+/* === Content Area === */
+.content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* === Skill Panels === */
+.panels {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  gap: 1px;
+  background: var(--border);
+}
+
+.panel {
+  flex: 1;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+.panel-header {
+  padding: 8px 12px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0;
+}
+.panel-header .panel-title {
+  font-weight: 600; font-size: 12px;
+  display: flex; align-items: center; gap: 6px;
+}
+.panel-header .panel-actions { display: flex; gap: 4px; }
+.panel-header .panel-actions button {
+  background: none; border: 1px solid var(--border); color: var(--text2);
+  padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 11px;
+  font-family: inherit;
+}
+.panel-header .panel-actions button:hover { background: var(--bg3); color: var(--text); }
+
+/* Tool tabs */
+.tool-tabs {
+  display: flex; border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.tool-tab {
+  flex: 1; text-align: center; padding: 6px 8px;
+  cursor: pointer; font-size: 11px; color: var(--text3);
+  border-bottom: 2px solid transparent; transition: var(--transition);
+  font-family: inherit;
+  background: none; border-top: none; border-left: none; border-right: none;
+  border-bottom: 2px solid transparent;
+}
+.tool-tab:hover { color: var(--text2); }
+.tool-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.skill-list {
+  flex: 1; overflow-y: auto; padding: 4px 0;
+}
+.skill-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; cursor: pointer; transition: var(--transition);
+  border-left: 3px solid transparent;
+}
+.skill-item:hover { background: var(--bg2); }
+.skill-item.selected { background: var(--bg3); border-left-color: var(--accent2); }
+.skill-item .check {
+  width: 14px; height: 14px; border: 1.5px solid var(--border);
+  border-radius: 3px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 10px; color: transparent;
+}
+.skill-item.selected .check { background: var(--accent2); border-color: var(--accent2); color: var(--bg); }
+.skill-item .skill-icon { font-size: 15px; flex-shrink: 0; }
+.skill-item .skill-info { flex: 1; min-width: 0; }
+.skill-item .skill-name { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.skill-item .skill-meta { font-size: 10px; color: var(--text3); display: flex; gap: 8px; }
+.skill-item .sync-tag {
+  font-size: 9px; padding: 0px 5px; border-radius: 3px;
+  background: var(--bg3); color: var(--green);
+}
+.skill-item .sync-tag.only-local { color: var(--yellow); }
+.skill-item .sync-tag.only-remote { color: var(--orange); }
+.skill-item .sync-tag.conflict { color: var(--red); }
+
+.panel-empty {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  color: var(--text3); font-size: 12px; flex-direction: column; gap: 6px;
+}
+
+/* === Bottom Bar === */
+.bottombar {
+  background: var(--bg2); border-top: 1px solid var(--border);
+  padding: 8px 12px; display: flex; align-items: center; gap: 12px;
+  flex-shrink: 0;
+}
+.bottombar .sync-direction {
+  display: flex; gap: 2px;
+}
+.bottombar .sync-direction button {
+  background: var(--bg3); border: 1px solid var(--border); color: var(--text2);
+  padding: 6px 14px; cursor: pointer; font-family: inherit; font-size: 12px;
+  transition: var(--transition);
+}
+.bottombar .sync-direction button:first-child { border-radius: 4px 0 0 4px; }
+.bottombar .sync-direction button:last-child { border-radius: 0 4px 4px 0; }
+.bottombar .sync-direction button.active {
+  background: var(--accent); color: var(--bg); border-color: var(--accent);
+}
+.bottombar .sync-direction button:not(.active):hover { background: var(--bg3); color: var(--text); }
+
+.bottombar .level-select {
+  display: flex; gap: 2px;
+}
+.bottombar .level-select button {
+  background: var(--bg3); border: 1px solid var(--border); color: var(--text2);
+  padding: 6px 10px; cursor: pointer; font-family: inherit; font-size: 11px;
+  border-radius: 4px; transition: var(--transition);
+}
+.bottombar .level-select button.active {
+  background: var(--purple); color: var(--bg); border-color: var(--purple);
+}
+.bottombar .level-select button:not(.active):hover { background: var(--bg3); color: var(--text); }
+
+.bottombar .divider { width: 1px; height: 20px; background: var(--border); }
+
+.bottombar .tool-checkboxes {
+  display: flex; gap: 8px; align-items: center;
+}
+.bottombar .tool-checkboxes label {
+  display: flex; align-items: center; gap: 4px;
+  color: var(--text2); font-size: 11px; cursor: pointer;
+}
+.bottombar .tool-checkboxes input[type="checkbox"] { accent-color: var(--accent); }
+
+.bottombar .spacer { flex: 1; }
+
+.bottombar .sync-btn {
+  background: var(--accent2); color: var(--bg); border: none;
+  padding: 7px 20px; border-radius: 4px; cursor: pointer;
+  font-weight: 600; font-size: 12px; font-family: inherit;
+  transition: var(--transition);
+}
+.bottombar .sync-btn:hover { opacity: 0.9; }
+
+.bottombar .status-msg { color: var(--text3); font-size: 11px; }
+
+/* === Sync Progress Overlay === */
+.overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+  display: none; align-items: center; justify-content: center;
+  z-index: 100;
+}
+.overlay.show { display: flex; }
+
+.dialog {
+  background: var(--bg2); border-radius: var(--radius);
+  box-shadow: var(--shadow); min-width: 400px; max-width: 520px;
+  border: 1px solid var(--border);
+}
+.dialog-header {
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.dialog-header h3 { font-size: 14px; }
+.dialog-close {
+  background: none; border: none; color: var(--text3); cursor: pointer;
+  font-size: 18px; padding: 0 4px;
+}
+.dialog-close:hover { color: var(--text); }
+.dialog-body { padding: 12px 16px; }
+.dialog-footer {
+  padding: 10px 16px; border-top: 1px solid var(--border);
+  display: flex; justify-content: flex-end; gap: 8px;
+}
+
+/* Progress items */
+.progress-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 0; border-bottom: 1px solid var(--border);
+}
+.progress-item:last-child { border-bottom: none; }
+.progress-item .p-icon { font-size: 14px; width: 18px; text-align: center; }
+.progress-item .p-icon.done { color: var(--green); }
+.progress-item .p-icon.active { color: var(--accent2); }
+.progress-item .p-icon.wait { color: var(--text3); }
+.progress-item .p-info { flex: 1; font-size: 12px; }
+.progress-item .p-path { color: var(--text2); font-size: 10px; }
+.progress-item .p-status { font-size: 10px; }
+.progress-item .p-status.done { color: var(--green); }
+.progress-item .p-status.active { color: var(--accent2); }
+
+.progress-bar-wrap {
+  margin-top: 10px; background: var(--bg3); border-radius: 10px;
+  height: 4px; overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%; background: var(--accent2);
+  border-radius: 10px; transition: width 0.3s;
+}
+
+/* Buttons */
+.btn {
+  padding: 6px 16px; border-radius: 4px; cursor: pointer;
+  font-family: inherit; font-size: 12px; border: none; transition: var(--transition);
+}
+.btn-primary { background: var(--accent2); color: var(--bg); }
+.btn-primary:hover { opacity: 0.9; }
+.btn-secondary { background: var(--bg3); color: var(--text); border: 1px solid var(--border); }
+.btn-secondary:hover { background: var(--bg); }
+.btn-danger { background: var(--red); color: var(--bg); }
+.btn-danger:hover { opacity: 0.9; }
+
+/* Form */
+.form-group { margin-bottom: 10px; }
+.form-group label { display: block; font-size: 11px; color: var(--text2); margin-bottom: 4px; }
+.form-group input, .form-group select {
+  width: 100%; padding: 6px 10px; background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text); font-family: inherit; font-size: 12px;
+}
+.form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent); }
+.form-row { display: flex; gap: 8px; }
+.form-row .form-group { flex: 1; }
+
+/* Toast */
+.toast {
+  position: fixed; bottom: 20px; right: 20px;
+  background: var(--bg3); color: var(--text); border: 1px solid var(--border);
+  padding: 10px 16px; border-radius: var(--radius);
+  box-shadow: var(--shadow); font-size: 12px;
+  z-index: 200; opacity: 0; transform: translateY(10px);
+  transition: all 0.3s;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.success { border-color: var(--green); }
+.toast.error { border-color: var(--red); }
+
+/* Sync tag legend */
+.tag-legend {
+  display: flex; gap: 12px; padding: 4px 12px;
+  font-size: 10px; color: var(--text3);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.tag-legend span { display: flex; align-items: center; gap: 4px; }
+.tag-legend .dot { width: 6px; height: 6px; border-radius: 50%; }
+.tag-legend .dot.synced { background: var(--green); }
+.tag-legend .dot.local { background: var(--yellow); }
+.tag-legend .dot.remote { background: var(--orange); }
+.tag-legend .dot.conflict { background: var(--red); }
+</style>
+</head>
+<body>
+
+<!-- Top Bar -->
+<div class="topbar">
+  <span class="logo">&#9881; Skill Manager</span>
+  <button class="menu-btn" onclick="showDialog('conn-dialog')">连接管理</button>
+  <button class="menu-btn" onclick="showDialog('project-dialog')">项目管理</button>
+  <button class="menu-btn">操作历史</button>
+  <div class="spacer"></div>
+  <div class="status-dot"></div>
+  <span class="status-text">就绪 | 上次同步: 2026-05-18 10:30</span>
+</div>
+
+<!-- Main Content -->
+<div class="main">
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <h3>Skill 视图</h3>
+      <button class="add-btn" onclick="showDialog('project-dialog')" title="添加项目">+</button>
+    </div>
+    <div class="sidebar-nav" id="sidebar-nav">
+      <div class="section-title">全局</div>
+      <div class="nav-item active" data-view="global" onclick="switchView(this, 'global')">
+        <span class="icon">&#127760;</span>
+        <span>全局 Skill</span>
+        <span class="badge">5</span>
+      </div>
+      <div class="section-title" style="margin-top:8px;">项目</div>
+      <div class="nav-item" data-view="project1" onclick="switchView(this, 'project1')">
+        <span class="icon">&#128193;</span>
+        <span>开发任务A</span>
+        <span class="badge">3</span>
+      </div>
+      <div class="nav-item" data-view="project2" onclick="switchView(this, 'project2')">
+        <span class="icon">&#128193;</span>
+        <span>网站重构</span>
+        <span class="badge">1</span>
+      </div>
+    </div>
+    <div class="sidebar-footer">
+      <div class="device-indicator online"></div>
+      <span class="device-name">dev-server-01</span>
+      <span class="device-count">2 台设备</span>
+    </div>
+  </div>
+
+  <!-- Content -->
+  <div class="content">
+    <!-- Panels -->
+    <div class="panels">
+      <!-- Local Panel -->
+      <div class="panel" id="panel-local">
+        <div class="panel-header">
+          <span class="panel-title">&#128187; 本机 (Windows)</span>
+          <div class="panel-actions">
+            <button onclick="refreshLocal()">&#8635; 刷新</button>
+          </div>
+        </div>
+        <div class="tool-tabs">
+          <button class="tool-tab active" onclick="switchToolTab(this, 'codex')">Codex</button>
+          <button class="tool-tab" onclick="switchToolTab(this, 'claude')">Claude Code</button>
+          <button class="tool-tab" onclick="switchToolTab(this, 'cc-switch')">CC-Switch</button>
+        </div>
+        <div class="tag-legend">
+          <span><span class="dot synced"></span>已同步</span>
+          <span><span class="dot local"></span>仅本机</span>
+          <span><span class="dot conflict"></span>内容不同</span>
+        </div>
+        <div class="skill-list" id="local-skill-list">
+          <!-- dynamically filled -->
+        </div>
+      </div>
+
+      <!-- Remote Panel -->
+      <div class="panel" id="panel-remote">
+        <div class="panel-header">
+          <span class="panel-title">&#127760; 远程 (Linux - dev-server-01)</span>
+          <div class="panel-actions">
+            <select style="background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:2px 6px;font-size:11px;font-family:inherit;">
+              <option>dev-server-01</option>
+              <option>dev-server-02</option>
+            </select>
+            <button onclick="refreshRemote()">&#8635; 刷新</button>
+          </div>
+        </div>
+        <div class="tool-tabs">
+          <button class="tool-tab active" onclick="switchToolTab(this, 'codex')">Codex</button>
+          <button class="tool-tab" onclick="switchToolTab(this, 'claude')">Claude Code</button>
+          <button class="tool-tab" onclick="switchToolTab(this, 'cc-switch')">CC-Switch</button>
+        </div>
+        <div class="tag-legend">
+          <span><span class="dot synced"></span>已同步</span>
+          <span><span class="dot remote"></span>仅远程</span>
+          <span><span class="dot conflict"></span>内容不同</span>
+        </div>
+        <div class="skill-list" id="remote-skill-list">
+          <!-- dynamically filled -->
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom Bar -->
+    <div class="bottombar">
+      <div class="sync-direction" id="sync-direction">
+        <button class="active" data-dir="push" onclick="setSyncDir(this)">&#10132; 推送选中</button>
+        <button data-dir="pull" onclick="setSyncDir(this)">&#10132; 拉取选中</button>
+      </div>
+      <div class="divider"></div>
+      <div class="level-select" id="level-select">
+        <button class="active" data-level="global" onclick="setSyncLevel(this)">全局&#8596;全局</button>
+        <button data-level="to-project" onclick="setSyncLevel(this)">全局&#8594;项目</button>
+        <button data-level="to-global" onclick="setSyncLevel(this)">项目&#8594;全局</button>
+        <button data-level="project" onclick="setSyncLevel(this)">项目&#8596;项目</button>
+      </div>
+      <div class="divider"></div>
+      <div class="tool-checkboxes">
+        <label><input type="checkbox" checked> Codex</label>
+        <label><input type="checkbox" checked> Claude Code</label>
+        <label><input type="checkbox"> CC-Switch</label>
+      </div>
+      <div class="spacer"></div>
+      <span class="status-msg" id="sync-status">已选择 2 个 skill</span>
+      <button class="sync-btn" onclick="startSync()">&#9733; 开始同步</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== DIALOGS ===== -->
+
+<!-- Connection Management Dialog -->
+<div class="overlay" id="conn-dialog">
+  <div class="dialog" style="width:500px;">
+    <div class="dialog-header">
+      <h3>连接管理</h3>
+      <button class="dialog-close" onclick="hideDialog('conn-dialog')">&times;</button>
+    </div>
+    <div class="dialog-body">
+      <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px;" id="conn-list">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--bg3);border-radius:4px;">
+          <div>
+            <div style="font-weight:600;">dev-server-01</div>
+            <div style="font-size:10px;color:var(--text3);">root@192.168.1.100:22 &#183; 密钥认证</div>
+          </div>
+          <div style="display:flex;gap:4px;align-items:center;">
+            <div class="device-indicator online" style="width:8px;height:8px;border-radius:50%;background:var(--green);"></div>
+            <button class="btn btn-secondary" style="padding:2px 8px;font-size:11px;">编辑</button>
+            <button class="btn btn-secondary" style="padding:2px 8px;font-size:11px;">测试</button>
+          </div>
+        </div>
+      </div>
+      <button class="btn btn-secondary" style="width:100%;" onclick="showToast('功能演示，未实现', '')">+ 新增连接</button>
+    </div>
+    <div class="dialog-footer">
+      <button class="btn btn-secondary" onclick="hideDialog('conn-dialog')">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- Project Management Dialog -->
+<div class="overlay" id="project-dialog">
+  <div class="dialog" style="width:480px;">
+    <div class="dialog-header">
+      <h3>注册项目</h3>
+      <button class="dialog-close" onclick="hideDialog('project-dialog')">&times;</button>
+    </div>
+    <div class="dialog-body">
+      <div class="form-group">
+        <label>项目名称</label>
+        <input type="text" placeholder="例如：开发任务A" value="开发任务A">
+      </div>
+      <div class="form-group">
+        <label>本机路径</label>
+        <div style="display:flex;gap:6px;">
+          <input type="text" placeholder="例如：D:\projects\task-a" value="D:\projects\task-a" style="flex:1;">
+          <button class="btn btn-secondary" style="padding:6px 12px;">浏览</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label style="display:flex;align-items:center;gap:6px;">
+          <input type="checkbox" checked style="accent-color:var(--accent);"> 关联远程机器
+        </label>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>远程设备</label>
+          <select><option>dev-server-01</option></select>
+        </div>
+        <div class="form-group">
+          <label>远程路径</label>
+          <input type="text" placeholder="/home/user/task-a" value="/home/user/task-a">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>支持工具</label>
+        <div style="display:flex;gap:12px;">
+          <label style="display:flex;align-items:center;gap:4px;color:var(--text2);font-size:12px;"><input type="checkbox" checked style="accent-color:var(--accent);"> Codex</label>
+          <label style="display:flex;align-items:center;gap:4px;color:var(--text2);font-size:12px;"><input type="checkbox" checked style="accent-color:var(--accent);"> Claude Code</label>
+        </div>
+      </div>
+      <!-- Existing projects list -->
+      <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px;">
+        <label style="font-size:11px;color:var(--text3);margin-bottom:6px;display:block;">已注册项目</label>
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;background:var(--bg3);border-radius:4px;">
+            <div>
+              <span style="font-size:12px;">&#128193; 开发任务A</span>
+              <span style="font-size:10px;color:var(--text3);margin-left:8px;">D:\projects\task-a</span>
+            </div>
+            <button class="btn btn-secondary" style="padding:2px 6px;font-size:10px;">删除</button>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;background:var(--bg3);border-radius:4px;">
+            <div>
+              <span style="font-size:12px;">&#128193; 网站重构</span>
+              <span style="font-size:10px;color:var(--text3);margin-left:8px;">D:\projects\website</span>
+            </div>
+            <button class="btn btn-secondary" style="padding:2px 6px;font-size:10px;">删除</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="dialog-footer">
+      <button class="btn btn-secondary" onclick="hideDialog('project-dialog')">取消</button>
+      <button class="btn btn-primary" onclick="hideDialog('project-dialog');showToast('项目已注册', 'success')">注册</button>
+    </div>
+  </div>
+</div>
+
+<!-- Sync Progress Dialog -->
+<div class="overlay" id="sync-dialog">
+  <div class="dialog" style="width:440px;">
+    <div class="dialog-header">
+      <h3>正在同步...</h3>
+      <button class="dialog-close" onclick="hideDialog('sync-dialog')">&times;</button>
+    </div>
+    <div class="dialog-body">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:8px;">
+        方向: 本机全局 &#8594; dev-server-01 (远程)
+      </div>
+      <div style="font-size:11px;color:var(--text2);margin-bottom:8px;">
+        目标: .claude/skills
+      </div>
+      <div id="sync-progress-list">
+        <div class="progress-item">
+          <span class="p-icon done">&#10004;</span>
+          <div class="p-info">
+            <div>skill-A</div>
+            <div class="p-path">&#8594; 远程/开发任务A/.claude</div>
+          </div>
+          <span class="p-status done">完成</span>
+        </div>
+        <div class="progress-item">
+          <span class="p-icon active">&#8635;</span>
+          <div class="p-info">
+            <div>skill-D</div>
+            <div class="p-path">&#8594; 远程/开发任务A/.claude</div>
+          </div>
+          <span class="p-status active">传输中...</span>
+        </div>
+        <div class="progress-item">
+          <span class="p-icon wait">&#9679;</span>
+          <div class="p-info">
+            <div>skill-E</div>
+            <div class="p-path">&#8594; 远程/开发任务A/.claude</div>
+          </div>
+          <span class="p-status">等待</span>
+        </div>
+      </div>
+      <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" style="width:33%;"></div>
+      </div>
+      <div style="text-align:center;font-size:11px;color:var(--text3);margin-top:6px;">进度: 1/3</div>
+    </div>
+    <div class="dialog-footer">
+      <button class="btn btn-secondary" onclick="hideDialog('sync-dialog')">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ===== Sample Data =====
+const localSkills = [
+  { name: 'skill-A', tool: 'codex', size: '12KB', time: '2026-05-15', status: 'synced' },
+  { name: 'skill-B', tool: 'codex', size: '8KB', time: '2026-05-17', status: 'local-only' },
+  { name: 'skill-A', tool: 'claude', size: '12KB', time: '2026-05-15', status: 'synced' },
+  { name: 'skill-D', tool: 'claude', size: '24KB', time: '2026-05-18', status: 'conflict' },
+  { name: 'skill-A', tool: 'cc-switch', size: '12KB', time: '2026-05-15', status: 'synced' },
+];
+
+const remoteSkills = [
+  { name: 'skill-A', tool: 'codex', size: '12KB', time: '2026-05-15', status: 'synced' },
+  { name: 'skill-C', tool: 'codex', size: '5KB', time: '2026-05-10', status: 'remote-only' },
+  { name: 'skill-A', tool: 'claude', size: '12KB', time: '2026-05-15', status: 'synced' },
+  { name: 'skill-E', tool: 'claude', size: '18KB', time: '2026-05-12', status: 'remote-only' },
+  { name: 'skill-F', tool: 'cc-switch', size: '3KB', time: '2026-05-14', status: 'remote-only' },
+];
+
+const projectSkills = {
+  project1: {
+    local: [
+      { name: 'skill-X', tool: 'claude', size: '6KB', time: '2026-05-16', status: 'synced' },
+      { name: 'skill-Y', tool: 'codex', size: '9KB', time: '2026-05-18', status: 'local-only' },
+    ],
+    remote: [
+      { name: 'skill-X', tool: 'claude', size: '6KB', time: '2026-05-16', status: 'synced' },
+      { name: 'skill-Y', tool: 'codex', size: '9KB', time: '2026-05-18', status: 'local-only' },
+    ],
+  },
+  project2: {
+    local: [
+      { name: 'skill-Z', tool: 'claude', size: '14KB', time: '2026-05-14', status: 'local-only' },
+    ],
+    remote: [],
+  },
+};
+
+let selectedSkills = new Set();
+let currentView = 'global';
+let syncDirection = 'push';
+let syncLevel = 'global';
+
+// ===== Render Functions =====
+function statusLabel(status) {
+  const map = {
+    'synced': '已同步',
+    'local-only': '仅本机',
+    'remote-only': '仅远程',
+    'conflict': '内容不同',
+  };
+  return map[status] || status;
+}
+
+function getToolIcon(tool) {
+  const map = { codex: '&#9200;', claude: '&#9881;', 'cc-switch': '&#128260;' };
+  return map[tool] || '&#128196;';
+}
+
+function renderSkillList(containerId, skills, panelSide) {
+  const container = document.getElementById(containerId);
+  if (!skills.length) {
+    container.innerHTML = `<div class="panel-empty">
+      <span>&#128196;</span>
+      <span>暂无 skill</span>
+    </div>`;
+    return;
+  }
+  container.innerHTML = skills.map(s => {
+    const selClass = selectedSkills.has(`${panelSide}:${s.name}:${s.tool}`) ? ' selected' : '';
+    return `
+    <div class="skill-item${selClass}" data-key="${panelSide}:${s.name}:${s.tool}" onclick="toggleSkill(this, '${panelSide}', '${s.name}', '${s.tool}')">
+      <div class="check">&#10004;</div>
+      <span class="skill-icon">${getToolIcon(s.tool)}</span>
+      <div class="skill-info">
+        <div class="skill-name">${s.name}</div>
+        <div class="skill-meta">
+          <span>${s.size}</span>
+          <span>${s.time}</span>
+        </div>
+      </div>
+      <span class="sync-tag ${s.status}">${statusLabel(s.status)}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderAll() {
+  let localData, remoteData;
+  if (currentView === 'global') {
+    localData = localSkills;
+    remoteData = remoteSkills;
+  } else {
+    const proj = currentView === 'project1' ? projectSkills.project1 : projectSkills.project2;
+    localData = proj.local;
+    remoteData = proj.remote;
+  }
+
+  const activeToolTab = document.querySelector('#panel-local .tool-tab.active');
+  const tool = activeToolTab ? activeToolTab.dataset.tool || 'codex' : 'codex';
+
+  const filteredLocal = tool === 'all' ? localData : localData.filter(s => s.tool === tool);
+  const filteredRemote = tool === 'all' ? remoteData : remoteData.filter(s => s.tool === tool);
+
+  renderSkillList('local-skill-list', filteredLocal, 'local');
+  renderSkillList('remote-skill-list', filteredRemote, 'remote');
+  updateSelectedCount();
+}
+
+function switchView(el, view) {
+  currentView = view;
+  document.querySelectorAll('.sidebar-nav .nav-item').forEach(n => n.classList.remove('active'));
+  el.classList.add('active');
+  // Reset tool tabs to first
+  document.querySelectorAll('#panel-local .tool-tab, #panel-remote .tool-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector('#panel-local .tool-tab').classList.add('active');
+  document.querySelector('#panel-remote .tool-tab').classList.add('active');
+  selectedSkills.clear();
+  renderAll();
+}
+
+function switchToolTab(el, tool) {
+  const panel = el.closest('.panel');
+  panel.querySelectorAll('.tool-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  el.dataset.tool = tool;
+  renderAll();
+}
+
+function toggleSkill(el, side, name, tool) {
+  const key = `${side}:${name}:${tool}`;
+  if (selectedSkills.has(key)) {
+    selectedSkills.delete(key);
+    el.classList.remove('selected');
+  } else {
+    selectedSkills.add(key);
+    el.classList.add('selected');
+  }
+  updateSelectedCount();
+}
+
+function updateSelectedCount() {
+  document.getElementById('sync-status').textContent =
+    `已选择 ${selectedSkills.size} 个 skill`;
+}
+
+function setSyncDir(el) {
+  document.querySelectorAll('#sync-direction button').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+  syncDirection = el.dataset.dir;
+}
+
+function setSyncLevel(el) {
+  document.querySelectorAll('#level-select button').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+  syncLevel = el.dataset.level;
+}
+
+// ===== Dialogs =====
+function showDialog(id) {
+  document.getElementById(id).classList.add('show');
+}
+function hideDialog(id) {
+  document.getElementById(id).classList.remove('show');
+}
+
+// ===== Toast =====
+let toastTimer;
+function showToast(msg, type) {
+  const toast = document.getElementById('toast');
+  toast.textContent = msg;
+  toast.className = 'toast ' + type + ' show';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.classList.remove('show'); }, 2000);
+}
+
+// ===== Sync =====
+function startSync() {
+  if (selectedSkills.size === 0) {
+    showToast('请先选择要同步的 skill', 'error');
+    return;
+  }
+  showDialog('sync-dialog');
+  // Simulate progress
+  let progress = 0;
+  const bar = document.querySelector('#sync-dialog .progress-bar-fill');
+  const interval = setInterval(() => {
+    progress += 40;
+    if (progress >= 100) {
+      progress = 100;
+      bar.style.width = '100%';
+      clearInterval(interval);
+      document.querySelectorAll('#sync-progress-list .p-icon').forEach((icon, i) => {
+        icon.classList.remove('active', 'wait');
+        icon.classList.add('done');
+        icon.innerHTML = '&#10004;';
+      });
+      document.querySelectorAll('#sync-progress-list .p-status').forEach((s, i) => {
+        s.classList.remove('active');
+        s.classList.add('done');
+        s.textContent = '完成';
+      });
+      document.querySelector('#sync-dialog .dialog-body > div:last-child').previousElementSibling.textContent = '进度: 3/3';
+      setTimeout(() => {
+        hideDialog('sync-dialog');
+        showToast('同步完成', 'success');
+        selectedSkills.clear();
+        renderAll();
+      }, 800);
+    } else {
+      bar.style.width = progress + '%';
+    }
+  }, 600);
+}
+
+function refreshLocal() { showToast('本机 skill 已刷新', 'success'); }
+function refreshRemote() { showToast('远程 skill 已刷新', 'success'); }
+
+// ===== Init =====
+renderAll();
+
+// Click outside dialog to close
+document.querySelectorAll('.overlay').forEach(overlay => {
+  overlay.addEventListener('click', function(e) {
+    if (e.target === this) hideDialog(this.id);
+  });
+});
+</script>
+</body>
+</html>
