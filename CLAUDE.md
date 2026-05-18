@@ -4,40 +4,84 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-跨设备 Skill 管理软件 — a desktop tool (Windows) for managing AI coding assistant skills across local Windows and remote Linux machines. Supports Codex, Claude Code, and CC-Switch at both global and project levels.
+跨设备 Skill 管理软件 — a cross-platform desktop tool (Windows / macOS / Linux) for managing AI coding assistant skills across local and remote machines. Supports Codex, Claude Code, and CC-Switch at both global and project levels.
 
 ## Key Documents
 
 - `REQUIREMENTS.md` — full requirements specification
+- `IMPLEMENTATION.md` — architecture & implementation plan
 - `simple-description.md` — original brief
 
-## Tech Stack (Planned)
+## Tech Stack
 
-- **Language:** Python 3.10+ or Go 1.21+
-- **GUI:** PySide6 / WPF / Electron
-- **SSH:** Paramiko (Python) / crypto/ssh (Go)
-- **Storage:** SQLite for connection configs, project configs, and sync history
+- **Language:** Python 3.10+
+- **GUI:** PySide6 6.5+
+- **SSH:** Paramiko
+- **Crypto:** cryptography (AES-256-GCM)
+- **Credential storage:** keyring (Windows Credential Manager / macOS Keychain / Linux Secret Service)
+- **Storage:** SQLite (stdlib `sqlite3`)
+
+## Project Structure
+
+```
+src/
+├── main.py              # Entry point
+├── config.py            # Constants, tool names, path templates
+├── models/              # Data layer — Connection, Project, SyncHistory + CRUD over sqlite3
+├── services/            # Business logic — Scanner, Hasher, Sync, SSH, Crypto, ProjectService
+├── ui/                  # PySide6 widgets — MainWindow, Sidebar, Panels, BottomBar, Dialogs
+└── utils/               # Path utilities, logging
+
+tests/                   # pytest suite (56 tests, 8 modules)
+```
+
+## Commands
+
+```bash
+# Setup
+python -m venv .venv
+source .venv/bin/activate   # Linux/macOS
+# .venv\Scripts\activate    # Windows
+pip install -r requirements.txt
+
+# Run
+python -m src.main
+
+# Test
+python -m pytest tests/ -v
+
+# Package (all platforms)
+pip install pyinstaller
+pyinstaller skill-manager.spec
+```
+
+## Cross-Platform Notes
+
+- All paths use `pathlib.Path` / `Path.home()` — no OS-specific hardcoding
+- Keyring auto-selects the native credential store per platform
+- PyInstaller produces platform-native executables (`.exe` / `.app` / ELF binary)
+- Linux requires: `sudo apt install libxcb-cursor0` (Qt runtime dep)
+- The same source tree runs on all three platforms without modification
 
 ## Skill Directory Layout
 
 ```
-Windows                          Linux
-%USERPROFILE%/.codex/skills      ~/.codex/skills
-%USERPROFILE%/.claude/skills     ~/.claude/skills
-%USERPROFILE%/.cc-switch/skills  ~/.cc-switch/skills
+{Path.home()}/.codex/skills      # Codex global skills
+{Path.home()}/.claude/skills     # Claude Code global skills
+{Path.home()}/.cc-switch/skills  # CC-Switch global skills
 
 Project-level:
 <project>/.claude/skills
 <project>/.codex/skills
 ```
 
-## Core Features to Implement
+## Core Features
 
-1. **Read skills** — scan local/remote skill directories for Codex, Claude Code, CC-Switch
-2. **Deduplicate & compare** — identify skill differences across devices and levels (global/project)
-3. **Sync skills** — push/pull between local and remote, across global/project levels, with tool selection
-4. **SSH connection management** — store and reuse remote Linux connection configs
-5. **Project management** — register project directories for project-level skill isolation
+1. **Read skills** — scan local/remote skill directories (F1, F2)
+2. **Deduplicate & compare** — SHA-256 hash, classify as synced/local-only/remote-only/conflict (F3)
+3. **Sync skills** — push/pull with atomic write (temp+rename), backup/rollback, conflict handling (F4)
+4. **SSH connection management** — lazy connect, idle timeout, key/password auth with encrypted storage (F5)
+5. **Project management** — register project dirs, project-level skill isolation (F6)
 
 ## Sync Directions
 
@@ -45,14 +89,14 @@ Project-level:
 - Global ↔ Project (cross-level)
 - Project ↔ Project (same or different device)
 
-## Architecture Notes
+## Architecture
 
-The application has three conceptual layers:
-- **Device layer** — local Windows vs remote Linux, accessed via SSH
-- **Level layer** — global skills (shared) vs project skills (scoped to one project)
-- **Tool layer** — Codex / Claude Code / CC-Switch, each with its own skills directory
+Three-layer architecture:
+- **UI layer** — PySide6 widgets, QThread workers for I/O, signals/slots for data flow
+- **Services layer** — pure Python business logic, no Qt dependency
+- **Models layer** — dataclasses + thin CRUD over sqlite3, no business logic
 
-Skill identity is name-based; same name across devices/levels/tools = same skill. Hash-based comparison detects content divergence.
+Skill identity is `(name, tool)` — same name with different tools are different skills. Hash-based comparison detects content divergence. Skills are ephemeral (not persisted to DB), discovered fresh on each scan.
 
 ---
 

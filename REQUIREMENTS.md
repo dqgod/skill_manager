@@ -13,7 +13,7 @@
 
 ### 1.2 项目目标
 
-构建一个跨设备 skill 管理工具，运行于 Windows 平台，能够：
+构建一个跨设备 skill 管理工具，支持 Windows、Linux、macOS 平台，能够：
 
 - 读取本机（Windows）及远程机器（Linux）上各工具的 skill
 - 管理项目级别的 skill（注册项目目录，独立管理）
@@ -25,8 +25,8 @@
 
 | 维度       | 说明                        |
 | ---------- | --------------------------- |
-| 运行平台   | Windows 10+                 |
-| 管理对象   | 本机 Windows + 远程 Linux   |
+| 运行平台   | Windows 10+ / macOS 12+ / Linux (主流发行版) |
+| 管理对象   | 本机 + 远程 Linux   |
 | 支持工具   | Codex、Claude Code、CC-Switch |
 | Skill 层级 | 全局级、项目级              |
 | 用户群体   | 使用多设备、多 AI 编码工具的开发者 |
@@ -37,25 +37,19 @@
 
 ### 2.1 Skill 存放路径规范
 
-#### 2.1.1 全局 Skill — Windows 端
+#### 2.1.1 全局 Skill — 所有平台（通过 `Path.home()` 自动解析）
 
-| 工具         | 路径                                |
-| ------------ | ----------------------------------- |
-| Codex        | `%USERPROFILE%/.codex/skills`       |
-| Claude Code  | `%USERPROFILE%/.claude/skills`      |
-| CC-Switch    | `%USERPROFILE%/.cc-switch/skills`   |
+| 工具         | 路径格式                             | Windows 示例                          | Linux/macOS 示例          |
+| ------------ | ------------------------------------ | ------------------------------------- | ------------------------- |
+| Codex        | `{HOME}/.codex/skills`               | `%USERPROFILE%/.codex/skills`         | `~/.codex/skills`         |
+| Claude Code  | `{HOME}/.claude/skills`              | `%USERPROFILE%/.claude/skills`        | `~/.claude/skills`        |
+| CC-Switch    | `{HOME}/.cc-switch/skills`           | `%USERPROFILE%/.cc-switch/skills`     | `~/.cc-switch/skills`     |
 
-#### 2.1.2 全局 Skill — Linux 端
+> 程序使用 Python `Path.home()` 获取用户主目录，在 Windows 上自动解析为 `%USERPROFILE%`，在 Linux/macOS 上解析为 `~`。
 
-| 工具         | 路径                        |
-| ------------ | --------------------------- |
-| Codex        | `~/.codex/skills`           |
-| Claude Code  | `~/.claude/skills`          |
-| CC-Switch    | `~/.cc-switch/skills`       |
+#### 2.1.2 项目级 Skill — 全平台通用
 
-#### 2.1.3 项目级 Skill — Windows / Linux 通用
-
-| 工具         | 路径                        |
+| 工具         | 路径格式                    |
 | ------------ | --------------------------- |
 | Codex        | `<项目根>/.codex/skills`    |
 | Claude Code  | `<项目根>/.claude/skills`   |
@@ -240,9 +234,11 @@
 
 ### 3.4 兼容性
 
-- Windows 10 22H2+ / Windows 11。
-- 远程 Linux 支持主流发行版（Ubuntu 20.04+、CentOS 7+、Debian 11+）。
-- SSH 协议版本：SSH-2。
+- Windows 10 22H2+ / Windows 11
+- macOS 12 Monterey+
+- Linux（Ubuntu 20.04+、Debian 11+、Fedora 36+ 等主流发行版）
+- 远程 Linux 支持主流发行版（Ubuntu 20.04+、CentOS 7+、Debian 11+）
+- SSH 协议版本：SSH-2
 
 ### 3.5 可靠性
 
@@ -253,13 +249,16 @@
 
 ## 4. 技术约束
 
-| 项目         | 选型建议                            |
-| ------------ | ----------------------------------- |
-| 开发语言     | Python 3.10+ 或 Go 1.21+           |
-| GUI 框架     | PySide6 / WPF / Electron            |
-| SSH 库       | Paramiko (Python) / crypto/ssh (Go) |
-| 数据存储     | SQLite（连接配置、项目配置、操作历史）|
-| 配置加密     | 操作系统凭据管理器 / AES-256         |
+| 项目         | 选型                        | 说明 |
+| ------------ | --------------------------- | ---- |
+| 开发语言     | Python 3.10+                | 跨平台运行（Windows/macOS/Linux） |
+| GUI 框架     | PySide6 6.5+                | Qt for Python，三平台原生支持 |
+| SSH 库       | Paramiko                    | 纯 Python SSH 客户端 |
+| 加解密       | cryptography (AES-256-GCM)  | 密码加密存储 |
+| 凭据管理     | keyring                     | Windows 凭据管理器 / macOS Keychain / Linux Secret Service |
+| 数据存储     | SQLite（标准库）            | 连接配置、项目配置、操作历史 |
+| 路径处理     | pathlib.Path                | 自动适配各平台路径分隔符 |
+| 打包工具     | PyInstaller                 | Windows exe / macOS app / Linux 可执行文件 |
 
 ---
 
@@ -432,7 +431,7 @@
 | Skill     | AI 编码助手的扩展能力单元，以文件或目录形式存放于指定路径     |
 | 全局 Skill | 存放于用户目录下的 skill，所有项目共享                       |
 | 项目 Skill | 存放于项目 `.claude/skills` 或 `.codex/skills` 下的 skill    |
-| 本机      | 运行本管理软件的 Windows 机器                                |
+| 本机      | 运行本管理软件的机器（Windows / macOS / Linux）              |
 | 远程机器  | 通过 SSH 连接的 Linux 开发机                                 |
 | 推送      | 将 skill 从源复制到目标                                      |
 | 拉取      | 从远程机器获取 skill 到本机                                   |
@@ -444,4 +443,4 @@
 
 | 版本 | 日期       | 修订内容                                         | 作者   |
 | ---- | ---------- | ------------------------------------------------ | ------ |
-| v1.0 | 2026-05-18 | 初稿，包含全局 skill 管理、项目级 skill 管理功能   | Claude |
+| v1.0 | 2026-05-18 | 初稿，包含全局 skill 管理、项目级 skill 管理功能，支持跨平台编译运行 | Claude |
