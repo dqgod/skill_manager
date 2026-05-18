@@ -1,5 +1,6 @@
 """SSH 连接管理器：连接池、sftp、远程哈希计算 (F5)"""
 
+import shlex
 import stat
 import time
 from dataclasses import dataclass
@@ -71,12 +72,25 @@ class SSHManager:
         if client:
             try:
                 client.close()
-            except Exception:
-                pass
+                logger.info("SSH disconnected: %s", conn_id)
+            except Exception as e:
+                logger.warning("SSH close error for %s: %s", conn_id, e)
 
     def close_all(self):
         for cid in list(self._clients.keys()):
             self.close(cid)
+
+    def cleanup_idle(self):
+        """Close connections idle longer than IDLE_TIMEOUT seconds."""
+        now = time.time()
+        for conn_id in list(self._last_used.keys()):
+            last = self._last_used.get(conn_id, 0)
+            if now - last > self.IDLE_TIMEOUT:
+                logger.info(
+                    "Closing idle connection %s (idle for %.0fs)",
+                    conn_id, now - last,
+                )
+                self.close(conn_id)
 
     # ---- Remote Filesystem ----
 
@@ -88,6 +102,7 @@ class SSHManager:
             try:
                 attrs = sftp.listdir_attr(remote_path)
             except FileNotFoundError:
+                logger.info("Remote path does not exist: %s", remote_path)
                 return []
             results = []
             for a in attrs:
@@ -98,9 +113,10 @@ class SSHManager:
                     size=a.st_size if not stat.S_ISDIR(a.st_mode) else 0,
                     modified_at=a.st_mtime,
                 ))
+            logger.debug("list_dir %s: %d entries", remote_path, len(results))
             return results
         except Exception as e:
-            logger.warning(f"list_dir failed for {remote_path}: {e}")
+            logger.warning("list_dir failed for %s: %s", remote_path, e)
             return []
 
     def compute_remote_hash(self, conn: Connection, remote_path: str) -> str:
@@ -109,7 +125,7 @@ class SSHManager:
         try:
             # try file first
             stdin, stdout, stderr = client.exec_command(
-                f'sha256sum "{remote_path}" 2>/dev/null | cut -d" " -f1',
+                f'sha256sum {shlex.quote(remote_path)} 2>/dev/null | cut -d" " -f1',
                 timeout=30,
             )
             result = stdout.read().decode().strip()
@@ -118,7 +134,7 @@ class SSHManager:
 
             # directory: hash all files sorted
             cmd = (
-                f'cd "{remote_path}" 2>/dev/null && '
+                f'cd {shlex.quote(remote_path)} 2>/dev/null && '
                 f'find . -type f -print0 2>/dev/null | sort -z | '
                 f'xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d" " -f1'
             )
@@ -154,11 +170,19 @@ class SSHManager:
 
     def mkdir_p(self, conn: Connection, remote_path: str):
         client = self.get_client(conn)
-        client.exec_command(f'mkdir -p "{remote_path}"', timeout=10)
+        client.exec_command(f'mkdir -p {shlex.quote(remote_path)}', timeout=10)
 
     def delete(self, conn: Connection, remote_path: str):
         client = self.get_client(conn)
-        client.exec_command(f'rm -rf "{remote_path}"', timeout=10)
+        client.exec_command(f'rm -rf {shlex.quote(remote_path)}', timeout=10)
+
+    def get_remote_home(self, conn: Connection) -> str:
+        """Resolve the remote user's home directory via SSH."""
+        client = self.get_client(conn)
+        stdin, stdout, stderr = client.exec_command("echo $HOME", timeout=5)
+        home = stdout.read().decode().strip()
+        logger.debug("Remote home for %s@%s: %s", conn.username, conn.host, home)
+        return home
 
     def rename(self, conn: Connection, old_path: str, new_path: str):
         client = self.get_client(conn)
@@ -185,7 +209,7 @@ class SSHManager:
             if conn.password_enc:
                 connect_kwargs["password"] = self._crypto.decrypt(conn.password_enc)
         client.connect(**connect_kwargs)
-        logger.info(f"SSH connected to {conn.host}:{conn.port}")
+        logger.info("SSH connected to %s:%s", conn.host, conn.port)
         return client
 
     @staticmethod

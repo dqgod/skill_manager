@@ -39,7 +39,7 @@ class BottomBar(QWidget):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setStyleSheet(self._btn_style("sync-dir", "#89b4fa"))
-            btn.clicked.connect(lambda checked, k=key: setattr(self, '_sync_direction', k))
+            btn.clicked.connect(lambda checked=False, k=key: setattr(self, '_sync_direction', k))
             dir_group.addButton(btn, i)
             if i == 0:
                 btn.setChecked(True)
@@ -60,7 +60,7 @@ class BottomBar(QWidget):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setStyleSheet(self._btn_style("sync-level", "#cba6f7", 10))
-            btn.clicked.connect(lambda checked, k=key: setattr(self, '_sync_level', k))
+            btn.clicked.connect(lambda checked=False, k=key: setattr(self, '_sync_level', k))
             lvl_group.addButton(btn, i)
             if i == 0:
                 btn.setChecked(True)

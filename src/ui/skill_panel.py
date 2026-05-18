@@ -6,6 +6,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 
 from src.ui.skill_list_widget import SkillListWidget
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class SkillPanel(QWidget):
@@ -77,7 +80,7 @@ class SkillPanel(QWidget):
                 "QPushButton:hover { color: #a6adc8; }"
                 "QPushButton:checked { color: #89b4fa; border-bottom-color: #89b4fa; }"
             )
-            btn.clicked.connect(lambda checked, t=tool_id: self._on_tab_changed(t))
+            btn.clicked.connect(lambda checked=False, t=tool_id: self._on_tab_changed(t))
             self._tab_group.addButton(btn, i)
             self._tabs[tool_id] = btn
             tab_layout.addWidget(btn)
@@ -111,8 +114,10 @@ class SkillPanel(QWidget):
         layout.addWidget(self.skill_list, stretch=1)
 
     def _on_tab_changed(self, tool: str):
+        logger.info("[TabSwitch] SkillPanel(%s) tab clicked: %s", self._title, tool)
         self._current_tool = tool
         self.tool_changed.emit(tool)
+        logger.debug("[TabSwitch] tool_changed signal emitted for: %s", tool)
 
     @property
     def current_tool(self) -> str:
@@ -121,6 +126,8 @@ class SkillPanel(QWidget):
     def display_skills(self, skills):
         """Display skills filtered by current tool tab."""
         filtered = [s for s in skills if s.tool == self._current_tool]
+        logger.info("[DisplaySkills] panel=%s current_tool=%s total_skills=%d filtered=%d",
+                     self._title, self._current_tool, len(skills), len(filtered))
         self.skill_list.set_skills(filtered)
 
     def selected_skills(self):

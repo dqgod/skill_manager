@@ -255,3 +255,22 @@ class ConnectionDialog(QDialog):
         self._auth_type.setCurrentIndex(0)
         self._key_path.clear()
         self._password.clear()
+
+    def closeEvent(self, event):
+        self._stop_test_worker()
+        super().closeEvent(event)
+
+    def reject(self):
+        self._stop_test_worker()
+        super().reject()
+
+    def _stop_test_worker(self):
+        if self._test_worker is not None:
+            try:
+                self._test_worker.result.disconnect(self._on_test_result)
+            except (TypeError, RuntimeError):
+                pass
+            if self._test_worker.isRunning():
+                self._test_worker.quit()
+                self._test_worker.wait(2000)
+            self._test_worker = None

@@ -36,6 +36,7 @@ GLOBAL_SKILL_PATHS = {t.value: _global_skill_paths(t.value) for t in ALL_TOOLS}
 PROJECT_SKILL_SUBDIRS = {
     "codex": ".codex/skills",
     "claude": ".claude/skills",
+    "cc-switch": ".cc-switch/skills",
 }
 
 

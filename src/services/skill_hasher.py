@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from src.models.connection import Connection
 from src.services.skill_scanner import SkillInfo
 from src.services.ssh_manager import SSHManager
 from src.utils.logger import get_logger
@@ -56,7 +57,8 @@ class SkillHasher:
     # ---- Comparison ----
 
     def compare(self, local: list[SkillInfo],
-                remote: list[SkillInfo]) -> DiffResult:
+                remote: list[SkillInfo],
+                remote_connection: Optional[Connection] = None) -> DiffResult:
         """Compare two skill lists and classify each skill."""
         result = DiffResult()
 
@@ -85,7 +87,7 @@ class SkillHasher:
                     l.hash = self.compute_local_hash(l.path)
                 if r.hash is None:
                     if r.device_type == "remote" and self._ssh:
-                        r.hash = self.compute_remote_hash(None, r.path)
+                        r.hash = self.compute_remote_hash(remote_connection, r.path)
                     else:
                         # this is a local skill stored in remote list (unlikely)
                         r.hash = self.compute_local_hash(r.path)
@@ -99,17 +101,23 @@ class SkillHasher:
             elif r and not l:
                 result.remote_only.append(r)
 
+        logger.debug(
+            "Comparison: %d synced, %d local-only, %d remote-only, %d conflict",
+            len(result.synced), len(result.local_only),
+            len(result.remote_only), len(result.conflict),
+        )
         return result
 
     def classify_skills(self, local: list[SkillInfo],
-                        remote: list[SkillInfo]) -> list[SkillInfo]:
+                        remote: list[SkillInfo],
+                        remote_connection: Optional[Connection] = None) -> list[SkillInfo]:
         """Tag each local skill with sync status and return tagged list."""
         if not remote:
             for s in local:
                 s.hash = s.hash or "untagged"
             return local
 
-        diff = self.compare(local, remote)
+        diff = self.compare(local, remote, remote_connection=remote_connection)
 
         synced_names = {(s.name, s.tool) for s in diff.synced}
         local_names = {(s.name, s.tool) for s in diff.local_only}
@@ -130,14 +138,15 @@ class SkillHasher:
         return all_skills
 
     def classify_remote_skills(self, local: list[SkillInfo],
-                               remote: list[SkillInfo]) -> list[SkillInfo]:
+                               remote: list[SkillInfo],
+                               remote_connection: Optional[Connection] = None) -> list[SkillInfo]:
         """Tag each remote skill with sync status."""
         if not local:
             for s in remote:
                 s.hash = "untagged"
             return remote
 
-        diff = self.compare(local, remote)
+        diff = self.compare(local, remote, remote_connection=remote_connection)
 
         synced_names = {(s.name, s.tool) for s in diff.synced}
         remote_names = {(s.name, s.tool) for s in diff.remote_only}

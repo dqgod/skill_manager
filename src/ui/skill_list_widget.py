@@ -4,6 +4,9 @@ from PySide6.QtWidgets import QScrollArea, QVBoxLayout, QWidget, QLabel
 from PySide6.QtCore import Qt, Signal
 
 from src.ui.skill_item_row import SkillItemRow
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class SkillListWidget(QScrollArea):
@@ -27,6 +30,7 @@ class SkillListWidget(QScrollArea):
 
     def set_skills(self, skills):
         """Replace all rows with new skill list."""
+        logger.info("[SetSkills] rendering %d rows", len(skills))
         # clear existing
         for row in self._rows:
             row.setParent(None)

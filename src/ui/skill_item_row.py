@@ -110,9 +110,9 @@ class SkillItemRow(QFrame):
             self._check.setText("")
         self.style().polish(self)
 
-    def mousePressEvent(self, event):
+    def mouseReleaseEvent(self, event):
         self.clicked.emit()
-        super().mousePressEvent(event)
+        super().mouseReleaseEvent(event)
 
     @staticmethod
     def _format_size(size: int) -> str:

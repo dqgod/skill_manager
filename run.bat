@@ -7,5 +7,9 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
+REM Clear previous logs
+if exist "%USERPROFILE%\.skill-manager\logs\app.log" del /q "%USERPROFILE%\.skill-manager\logs\app.log"
+if exist "%USERPROFILE%\.skill-manager\logs\crash.log" del /q "%USERPROFILE%\.skill-manager\logs\crash.log"
+
 call ".venv\Scripts\python.exe" -m src.main
 pause

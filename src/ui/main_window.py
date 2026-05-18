@@ -1,10 +1,12 @@
 """主窗口：菜单栏 + 侧边栏 + 双面板 + 底部栏"""
 
+import copy
+
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QStatusBar,
 )
 from PySide6.QtGui import QAction
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 
 from src.config import (
     ALL_TOOLS_STR, SYNC_DIRECTION_PUSH, SYNC_DIRECTION_PULL,
@@ -27,6 +29,9 @@ from src.ui.dialogs.sync_progress_dialog import SyncProgressDialog
 from src.ui.dialogs.conflict_dialog import ConflictDialog
 from src.ui.dialogs.history_dialog import HistoryDialog
 from src.ui.widgets.toast import Toast
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class _LocalScanWorker(QThread):
@@ -126,11 +131,18 @@ class MainWindow(QMainWindow):
         self._scanner = SkillScanner(self._ssh)
         self._hasher = SkillHasher(self._ssh)
         self._sync_svc = SkillSyncService(self._ssh, self._hasher)
+
+        # Periodic idle connection cleanup
+        self._idle_timer = QTimer(self)
+        self._idle_timer.timeout.connect(self._ssh.cleanup_idle)
+        self._idle_timer.start(60_000)  # every 60 seconds
         self._projects: list = []
         self._sync_conflict_strategy = "ask"
         self._local_skills: list = []
         self._remote_skills: list = []
         self._active_connection: Connection | None = None
+        self._local_scan_seq = 0   # guard against stale local scan results
+        self._remote_scan_seq = 0  # guard against stale remote scan results
 
         self._setup_ui()
         self._ensure_default_connection()
@@ -233,6 +245,8 @@ class MainWindow(QMainWindow):
     def _on_tool_changed(self, side: str, tool: str):
         skills = self._local_skills if side == "local" else self._remote_skills
         panel = self._panels.local_panel if side == "local" else self._panels.remote_panel
+        logger.info("[TabSwitch] MainWindow._on_tool_changed side=%s tool=%s skills_count=%d",
+                     side, tool, len(skills))
         panel.display_skills(skills)
         self._on_selection_changed()
 
@@ -335,10 +349,15 @@ class MainWindow(QMainWindow):
 
     def _on_sync_finished(self, results):
         success_count = sum(1 for r in results if r.status == "success")
+        fail_count = sum(1 for r in results if r.status == "failed")
         self._sync_dialog.set_progress(len(results))
         self._sync_dialog.accept()
         self._toast.show_message(
             f"同步完成：{success_count}/{len(results)} 成功"
+        )
+        logger.info(
+            "Sync finished: %d success, %d failed, %d total",
+            success_count, fail_count, len(results),
         )
         # refresh both panels
         self._refresh_local(self._sidebar.active_view)
@@ -381,24 +400,62 @@ class MainWindow(QMainWindow):
             self._active_connection = connections[0]
 
     def _refresh_local(self, view_id: str):
+        # Disconnect and stop any previous worker
+        if hasattr(self, '_local_worker') and self._local_worker is not None:
+            try:
+                self._local_worker.finished.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+            if self._local_worker.isRunning():
+                self._local_worker.quit()
+                self._local_worker.wait(5000)
+
+        self._local_scan_seq += 1
+        seq = self._local_scan_seq
         self.statusBar().showMessage("正在扫描本机...")
         self.setCursor(Qt.BusyCursor)
         self._local_worker = _LocalScanWorker(
             self._scanner, view_id, self._projects
         )
-        self._local_worker.finished.connect(self._on_scan_local_done)
+        self._local_worker.finished.connect(
+            lambda skills, s=seq: self._on_scan_local_done_guarded(skills, s)
+        )
         self._local_worker.start()
 
     def _refresh_remote(self, view_id: str):
         if not self._active_connection:
             return
+        # Disconnect and stop any previous worker
+        if hasattr(self, '_remote_worker') and self._remote_worker is not None:
+            try:
+                self._remote_worker.finished.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+            if self._remote_worker.isRunning():
+                self._remote_worker.quit()
+                self._remote_worker.wait(5000)
+
+        self._remote_scan_seq += 1
+        seq = self._remote_scan_seq
         self.statusBar().showMessage("正在扫描远程...")
         self.setCursor(Qt.BusyCursor)
         self._remote_worker = _RemoteScanWorker(
             self._scanner, self._active_connection, view_id, self._projects
         )
-        self._remote_worker.finished.connect(self._on_scan_remote_done)
+        self._remote_worker.finished.connect(
+            lambda skills, s=seq: self._on_scan_remote_done_guarded(skills, s)
+        )
         self._remote_worker.start()
+
+    def _on_scan_local_done_guarded(self, skills: list, seq: int):
+        if seq != self._local_scan_seq:
+            return  # stale result
+        self._on_scan_local_done(skills)
+
+    def _on_scan_remote_done_guarded(self, skills: list, seq: int):
+        if seq != self._remote_scan_seq:
+            return  # stale result
+        self._on_scan_remote_done(skills)
 
     def _on_scan_local_done(self, skills: list):
         self.setCursor(Qt.ArrowCursor)
@@ -406,9 +463,14 @@ class MainWindow(QMainWindow):
         self._update_badges("local", skills)
         if self._remote_skills:
             self._auto_compare()
+        else:
+            # No remote data yet — mark all as local-only
+            for s in self._local_skills:
+                s.hash = "local-only"
         self._panels.local_panel.display_skills(self._local_skills)
         self.statusBar().showMessage(f"本机扫描完成，{len(skills)} 个 skill")
         self._on_selection_changed()
+        logger.info("Local scan completed: %d skills", len(skills))
 
     def _on_scan_remote_done(self, skills: list):
         self.setCursor(Qt.ArrowCursor)
@@ -416,17 +478,27 @@ class MainWindow(QMainWindow):
         self._update_badges("remote", skills)
         if self._local_skills:
             self._auto_compare()
+        else:
+            for s in self._remote_skills:
+                s.hash = "remote-only"
         self._panels.remote_panel.display_skills(self._remote_skills)
         self.statusBar().showMessage(f"远程扫描完成，{len(skills)} 个 skill")
         self._on_selection_changed()
+        logger.info("Remote scan completed: %d skills", len(skills))
 
     def _auto_compare(self):
         """Auto-compare local and remote skills, apply status tags."""
+        # Preserve original local skills before classify_skills mutates their
+        # hash fields (Bug 4). classify_remote_skills needs unmodified hashes.
+        original_local = copy.deepcopy(self._local_skills)
+
         self._local_skills = self._hasher.classify_skills(
-            self._local_skills, self._remote_skills
+            self._local_skills, self._remote_skills,
+            remote_connection=self._active_connection,
         )
         self._remote_skills = self._hasher.classify_remote_skills(
-            self._local_skills, self._remote_skills
+            original_local, self._remote_skills,
+            remote_connection=self._active_connection,
         )
 
     def _tag_to_status(self, skill_info) -> str:
@@ -452,5 +524,6 @@ class MainWindow(QMainWindow):
             self._sidebar.update_badges(global_count, pc)
 
     def closeEvent(self, event):
+        logger.info("Application shutting down")
         self._ssh.close_all()
         super().closeEvent(event)

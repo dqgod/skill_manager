@@ -290,12 +290,21 @@ class SkillSyncService:
             else:
                 shutil.copy2(task.source_path, tmp_target)
 
-        # hash verification on temp
-        local_hash = SkillHasher.compute_local_hash(
-            tmp_target if not target_conn else ""
-        )
-        if target_conn:
-            local_hash = SkillHasher.compute_local_hash(self._download_temp(target_conn, tmp_target))
+        # hash verification on temp (compare against real SHA-256 only)
+        if task.expected_hash and len(task.expected_hash) == 64 and all(
+            c in '0123456789abcdef' for c in task.expected_hash
+        ):
+            if target_conn:
+                actual = SkillHasher.compute_local_hash(
+                    self._download_temp(target_conn, tmp_target)
+                )
+            else:
+                actual = SkillHasher.compute_local_hash(tmp_target)
+            if actual and actual != task.expected_hash:
+                raise ValueError(
+                    f"Hash mismatch for {task.skill_name}: "
+                    f"expected {task.expected_hash[:8]}..., got {actual[:8]}..."
+                )
 
         # rename temp → actual (atomic)
         if target_conn:
@@ -307,11 +316,21 @@ class SkillSyncService:
 
     def _verify(self, task: SyncTask,
                 target_conn: Optional[Connection]) -> bool:
-        """Verify target hash matches expected."""
-        if not task.expected_hash or task.expected_hash in (
-            "synced", "conflict", "local-only", "remote-only", "unknown", ""
+        """Verify target hash matches expected.
+
+        Note: expected_hash may be a status tag (set by UI classification)
+        rather than a real SHA-256 hash. In that case verification is skipped.
+        """
+        if not task.expected_hash:
+            return True
+        if task.expected_hash in (
+            "synced", "conflict", "local-only", "remote-only", "unknown", "",
         ):
-            return True  # no hash to verify against
+            logger.debug(
+                "Skipping hash verify for %s: expected_hash is a status tag '%s'",
+                task.skill_name, task.expected_hash,
+            )
+            return True
         if target_conn:
             actual = self._ssh.compute_remote_hash(target_conn, task.target_path)
         else:
@@ -336,12 +355,11 @@ class SkillSyncService:
         )
         SyncHistoryModel.add(rec)
 
-    @staticmethod
-    def _delete_target(target_path: str,
+    def _delete_target(self, target_path: str,
                        target_conn: Optional[Connection]):
         try:
             if target_conn:
-                target_conn.exec_command(f'rm -rf "{target_path}"')
+                self._ssh.delete(target_conn, target_path)
             elif Path(target_path).is_dir():
                 shutil.rmtree(target_path, ignore_errors=True)
             elif Path(target_path).exists():
@@ -359,11 +377,10 @@ class SkillSyncService:
         tmp.unlink(missing_ok=True)
         return data
 
-    @staticmethod
-    def _download_temp(conn, remote_path: str) -> str:
+    def _download_temp(self, conn: Connection, remote_path: str) -> str:
         import tempfile
         tmp = Path(tempfile.mktemp())
-        data = conn.open_sftp().file(remote_path, "rb").read()
+        data = self._ssh.read_file(conn, remote_path)
         tmp.write_bytes(data)
         return str(tmp)
 

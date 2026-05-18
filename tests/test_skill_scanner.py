@@ -8,7 +8,7 @@ from src.models.project import Project
 
 class TestSkillScanner:
     def test_scan_directory_with_file_skill(self, tmp_path):
-        # create a .claude/skills/ dir with a skill file
+        # Bare files are not skills — only directories with SKILL.md are
         skills_dir = tmp_path / ".claude" / "skills"
         skills_dir.mkdir(parents=True)
         (skills_dir / "my-skill.md").write_text("# My Skill")
@@ -17,18 +17,14 @@ class TestSkillScanner:
         result = scanner._scan_directory(
             skills_dir, tool="claude", level="global", device="local"
         )
-        assert len(result) == 1
-        assert isinstance(result[0], SkillInfo)
-        assert result[0].name == "my-skill.md"
-        assert result[0].tool == "claude"
-        assert result[0].level == "global"
-        assert result[0].device == "local"
+        assert len(result) == 0  # bare .md file is not a valid skill
 
     def test_scan_directory_with_dir_skill(self, tmp_path):
         skills_dir = tmp_path / ".claude" / "skills"
         skills_dir.mkdir(parents=True)
         skill_dir = skills_dir / "my-skill"
         skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("# skill definition")
         (skill_dir / "README.md").write_text("# readme")
         (skill_dir / "main.py").write_text("print('hi')")
 
@@ -69,11 +65,15 @@ class TestSkillScanner:
     def test_scan_local_global_uses_patched_paths(self, monkeypatch, tmp_path):
         claude_dir = tmp_path / ".claude" / "skills"
         claude_dir.mkdir(parents=True)
-        (claude_dir / "claude-skill").mkdir()
+        cs = claude_dir / "claude-skill"
+        cs.mkdir()
+        (cs / "SKILL.md").write_text("# claude skill")
 
         codex_dir = tmp_path / ".codex" / "skills"
         codex_dir.mkdir(parents=True)
-        (codex_dir / "codex-skill.md").write_text("# codex")
+        cx = codex_dir / "codex-skill"
+        cx.mkdir()
+        (cx / "SKILL.md").write_text("# codex skill")
 
         # patch the reference in skill_scanner module namespace
         import src.services.skill_scanner as ss
@@ -87,14 +87,16 @@ class TestSkillScanner:
         results = scanner.scan_local_global(["claude", "codex"])
         names = sorted([r.name for r in results])
         assert "claude-skill" in names
-        assert "codex-skill.md" in names
+        assert "codex-skill" in names
 
     def test_scan_local_project(self, tmp_path):
         proj_dir = tmp_path / "my-project"
         proj_dir.mkdir()
         skills_dir = proj_dir / ".claude" / "skills"
         skills_dir.mkdir(parents=True)
-        (skills_dir / "proj-skill").mkdir()
+        ps = skills_dir / "proj-skill"
+        ps.mkdir()
+        (ps / "SKILL.md").write_text("# project skill")
 
         proj = Project(
             name="test-proj", local_path=str(proj_dir),

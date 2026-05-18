@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Optional
 
 from src.config import GLOBAL_SKILL_PATHS, PROJECT_SKILL_SUBDIRS, ALL_TOOLS
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -45,13 +48,17 @@ class SkillScanner:
         """Scan all global skill directories on the local machine."""
         if tools is None:
             tools = [t.value for t in ALL_TOOLS]
+        logger.info("Starting local global scan (tools=%s)", tools)
         skills: list[SkillInfo] = []
         for tool_name in tools:
             base = GLOBAL_SKILL_PATHS.get(tool_name)
+            logger.info("Local scan path for %s: %s", tool_name, base)
             if not base or not base.exists():
+                logger.warning("Local skill path does not exist: %s", base)
                 continue
             skills.extend(self._scan_directory(base, tool=tool_name,
                                                 level="global", device="local"))
+        logger.info("Local global scan done: %d skills found", len(skills))
         return skills
 
     def scan_local_project(self, project) -> list[SkillInfo]:
@@ -80,26 +87,42 @@ class SkillScanner:
             return []
         if tools is None:
             tools = [t.value for t in ALL_TOOLS]
+        remote_home = self._ssh.get_remote_home(conn)
+        logger.info("Starting remote global scan on %s@%s (home=%s, tools=%s)",
+                     conn.username, conn.host, remote_home, tools)
+        # Build remote skill paths — do NOT reuse local GLOBAL_SKILL_PATHS
+        remote_skill_paths = {
+            "codex": f"{remote_home}/.codex/skills",
+            "claude": f"{remote_home}/.claude/skills",
+            "cc-switch": f"{remote_home}/.cc-switch/skills",
+        }
         skills: list[SkillInfo] = []
         for tool_name in tools:
-            base = GLOBAL_SKILL_PATHS.get(tool_name)
+            base = remote_skill_paths.get(tool_name)
             if not base:
                 continue
+            logger.info("Remote scan path for %s: %s", tool_name, base)
             skills.extend(self._scan_remote_directory(
-                conn, str(base), tool=tool_name,
+                conn, base, tool=tool_name,
                 level="global", device=conn.name,
             ))
+        logger.info("Remote global scan done on %s@%s: %d skills found",
+                     conn.username, conn.host, len(skills))
         return skills
 
     def scan_remote_project(self, conn, project) -> list[SkillInfo]:
         if self._ssh is None or not project.remote_path:
             return []
+        logger.info("Starting remote project scan: %s (remote_path=%s)",
+                     project.name, project.remote_path)
         skills: list[SkillInfo] = []
         for tool_name in project.tool_list():
             subdir = PROJECT_SKILL_SUBDIRS.get(tool_name)
             if not subdir:
                 continue
             remote_base = f"{project.remote_path}/{subdir}"
+            logger.info("Remote project scan path for %s/%s: %s",
+                        project.name, tool_name, remote_base)
             skills.extend(self._scan_remote_directory(
                 conn, remote_base, tool=tool_name,
                 level="project", device=conn.name,
@@ -112,8 +135,17 @@ class SkillScanner:
                                project_id: Optional[str] = None,
                                project_name: Optional[str] = None) -> list[SkillInfo]:
         skills: list[SkillInfo] = []
+        logger.debug("Scanning remote path: %s", remote_path)
         entries = self._ssh.list_dir(conn, remote_path)
+        if not entries:
+            logger.info("Remote path empty or inaccessible: %s", remote_path)
         for entry in sorted(entries, key=lambda e: e.name):
+            # Only directories containing SKILL.md are valid skills
+            if not entry.is_dir:
+                continue
+            skill_md = f"{entry.path}/SKILL.md"
+            if not self._ssh.file_exists(conn, skill_md):
+                continue
             skills.append(SkillInfo(
                 name=entry.name,
                 tool=tool,
@@ -126,8 +158,10 @@ class SkillScanner:
                 size=entry.size,
                 modified_at=datetime.fromtimestamp(
                     entry.modified_at).strftime("%Y-%m-%d %H:%M"),
-                is_dir=entry.is_dir,
+                is_dir=True,
             ))
+        logger.info("Scanned remote %s: %d skills — %s",
+                     remote_path, len(skills), [s.name for s in skills])
         return skills
 
     # ---- Helpers ----
@@ -138,8 +172,15 @@ class SkillScanner:
         skills: list[SkillInfo] = []
         if not base.is_dir():
             return skills
-        for entry in sorted(base.iterdir()):
-            is_dir = entry.is_dir()
+        raw_entries = list(base.iterdir())
+        logger.debug("Scanning directory: %s (%d raw entries)", base, len(raw_entries))
+        for entry in sorted(raw_entries):
+            # Only directories containing SKILL.md are valid skills
+            if not entry.is_dir():
+                continue
+            skill_md = entry / "SKILL.md"
+            if not skill_md.is_file():
+                continue
             skills.append(SkillInfo(
                 name=entry.name,
                 tool=tool,
@@ -149,11 +190,13 @@ class SkillScanner:
                 device_type="local",
                 project_id=project_id,
                 project_name=project_name,
-                size=self._entry_size(entry) if not is_dir else self._dir_size(entry),
+                size=self._dir_size(entry),
                 modified_at=datetime.fromtimestamp(
                     entry.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
-                is_dir=is_dir,
+                is_dir=True,
             ))
+        logger.info("Scanned %s: %d skills — %s",
+                     base, len(skills), [s.name for s in skills])
         return skills
 
     @staticmethod
