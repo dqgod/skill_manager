@@ -10,3 +10,5 @@ data/
 .venv/
 venv/
 .claude/
+.mcp.json
+.ttadk/
