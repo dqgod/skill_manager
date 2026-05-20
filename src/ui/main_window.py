@@ -57,6 +57,7 @@ class _LocalScanWorker(QThread):
 
 class _RemoteScanWorker(QThread):
     finished = Signal(list)
+    failed = Signal(str)
 
     def __init__(self, scanner: SkillScanner, connection: Connection,
                  view_id: str, projects: list, parent=None):
@@ -68,13 +69,30 @@ class _RemoteScanWorker(QThread):
 
     def run(self):
         skills = []
-        if self._view_id == "global":
-            skills = self._scanner.scan_remote_global(self._conn)
-        else:
-            proj = next((p for p in self._projects if p.id == self._view_id), None)
-            if proj:
-                skills = self._scanner.scan_remote_project(self._conn, proj)
+        try:
+            if self._view_id == "global":
+                skills = self._scanner.scan_remote_global(self._conn)
+            else:
+                proj = next((p for p in self._projects if p.id == self._view_id), None)
+                if proj:
+                    skills = self._scanner.scan_remote_project(self._conn, proj)
+        except Exception as e:
+            logger.warning("Remote scan failed: %s", e)
+            self.failed.emit(self._format_error(e))
+            return
         self.finished.emit(skills)
+
+    @staticmethod
+    def _format_error(e: Exception) -> str:
+        msg = str(e) or e.__class__.__name__
+        low = msg.lower()
+        if isinstance(e, TimeoutError) or "timed out" in low or "timeout" in low:
+            return "连接超时：远程主机无响应，请检查网络/IP 或 VPN"
+        if "authentication" in low:
+            return "认证失败：用户名或密钥错误"
+        if "name or service not known" in low or "nodename" in low:
+            return "无法解析主机名，请检查 host 是否正确"
+        return f"远程扫描失败：{msg}"
 
 
 class _SyncWorker(QThread):
@@ -431,7 +449,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("正在扫描本机...")
         self.setCursor(Qt.BusyCursor)
         self._local_worker = _LocalScanWorker(
-            self._scanner, view_id, self._projects
+            self._scanner, view_id, self._projects, parent=self,
         )
         self._local_worker.finished.connect(
             lambda skills, s=seq: self._on_scan_local_done_guarded(skills, s)
@@ -447,6 +465,10 @@ class MainWindow(QMainWindow):
                 self._remote_worker.finished.disconnect()
             except (TypeError, RuntimeError):
                 pass
+            try:
+                self._remote_worker.failed.disconnect()
+            except (TypeError, RuntimeError, AttributeError):
+                pass
             if self._remote_worker.isRunning():
                 self._remote_worker.quit()
                 self._remote_worker.wait(5000)
@@ -456,22 +478,67 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("正在扫描远程...")
         self.setCursor(Qt.BusyCursor)
         self._remote_worker = _RemoteScanWorker(
-            self._scanner, self._active_connection, view_id, self._projects
+            self._scanner, self._active_connection, view_id, self._projects,
+            parent=self,
         )
         self._remote_worker.finished.connect(
             lambda skills, s=seq: self._on_scan_remote_done_guarded(skills, s)
+        )
+        self._remote_worker.failed.connect(
+            lambda msg, s=seq: self._on_scan_remote_failed_guarded(msg, s)
         )
         self._remote_worker.start()
 
     def _on_scan_local_done_guarded(self, skills: list, seq: int):
         if seq != self._local_scan_seq:
             return  # stale result
+        self._finalize_worker("_local_worker")
         self._on_scan_local_done(skills)
 
     def _on_scan_remote_done_guarded(self, skills: list, seq: int):
         if seq != self._remote_scan_seq:
             return  # stale result
+        self._finalize_worker("_remote_worker")
         self._on_scan_remote_done(skills)
+
+    def _on_scan_remote_failed_guarded(self, msg: str, seq: int):
+        if seq != self._remote_scan_seq:
+            return  # stale result
+        self._finalize_worker("_remote_worker")
+        self.setCursor(Qt.ArrowCursor)
+        self._remote_skills = []
+        self._panels.remote_panel.display_skills([])
+        self._update_badges("remote", [])
+        self.statusBar().showMessage(f"远程扫描失败：{msg}")
+        try:
+            toast = Toast(self)
+            toast.show_message(msg, duration=4000, success=False)
+        except Exception:
+            pass
+        logger.warning("Remote scan failed: %s", msg)
+
+    def _finalize_worker(self, attr: str):
+        """Quit + wait + deleteLater the QThread referenced by self.<attr>.
+
+        Why: Qt aborts the process with `QThread: Destroyed while thread is
+        still running` if the QThread Python object goes out of scope before
+        the underlying thread fully exits. We make sure the thread has
+        finished (event loop exited) before letting GC near it.
+        """
+        worker = getattr(self, attr, None)
+        if worker is None:
+            return
+        try:
+            if worker.isRunning():
+                worker.quit()
+                worker.wait(3000)
+        except RuntimeError:
+            pass
+        try:
+            worker.deleteLater()
+        except RuntimeError:
+            pass
+        setattr(self, attr, None)
 
     def _on_scan_local_done(self, skills: list):
         self.setCursor(Qt.ArrowCursor)

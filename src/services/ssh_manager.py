@@ -1,12 +1,14 @@
 """SSH 连接管理器：连接池、sftp、远程哈希计算 (F5)"""
 
 import hashlib
+import os
 import shlex
+import socket
 import stat
 import time
 import uuid
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 import paramiko
@@ -64,6 +66,8 @@ class SSHManager:
             return False, "认证失败：用户名或密码/密钥错误"
         except paramiko.SSHException as e:
             return False, f"SSH 连接错误：{e}"
+        except socket.timeout:
+            return False, f"连接超时：无法在 10 秒内连接到 {conn.host}:{conn.port}"
         except OSError as e:
             if "timed out" in str(e).lower() or "timeout" in str(e).lower():
                 return False, f"连接超时：无法在 10 秒内连接到 {conn.host}:{conn.port}"
@@ -246,23 +250,186 @@ class SSHManager:
     def _connect(self, conn: Connection, timeout: int = 30) -> paramiko.SSHClient:
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        # Resolve SSH config (Host alias / ProxyJump / IdentityFile / User / Port ...)
+        cfg = self._load_ssh_config_for(conn.host)
+        host = cfg.get("hostname", conn.host)
+        username = conn.username or cfg.get("user") or os.getenv("USER", "")
+        try:
+            port = int(cfg.get("port", conn.port))
+        except (TypeError, ValueError):
+            port = conn.port
+
         connect_kwargs = {
-            "hostname": conn.host,
-            "port": conn.port,
-            "username": conn.username,
+            "hostname": host,
+            "port": port,
+            "username": username,
             "timeout": timeout,
             "banner_timeout": timeout,
+            "auth_timeout": timeout,
             "compress": True,
+            "allow_agent": True,
+            "look_for_keys": True,
         }
+
+        # GSSAPI / Kerberos auth (e.g. internal corp networks).
+        # Strategy:
+        #   1) If paramiko has built-in GSS support (paramiko.ssh_gss), enable
+        #      it via gss_* kwargs — same path as command-line OpenSSH.
+        #   2) Otherwise, if a system `ssh` is available, fall back to
+        #      `ssh -W host:port` as a transport ProxyCommand and let OpenSSH
+        #      handle auth.
+        gss_enabled_native = False
+        if self._gssapi_available():
+            try:
+                import importlib
+                importlib.import_module("paramiko.ssh_gss")
+                connect_kwargs["gss_auth"] = True
+                connect_kwargs["gss_kex"] = True
+                connect_kwargs["gss_deleg_creds"] = True
+                connect_kwargs["gss_host"] = host
+                # Do NOT canonicalize via DNS — KDC may only have a ticket for
+                # the literal hostname/IP (e.g. host/10.x.x.x@REALM).
+                connect_kwargs["gss_trust_dns"] = False
+                gss_enabled_native = True
+            except Exception:
+                pass
+            if not gss_enabled_native and self._has_system_ssh():
+                try:
+                    connect_kwargs["sock"] = self._spawn_ssh_proxy(
+                        host, port, username, timeout=timeout,
+                    )
+                    connect_kwargs["allow_agent"] = False
+                    connect_kwargs["look_for_keys"] = False
+                    logger.info("Using system ssh as transport proxy for %s@%s",
+                                username, host)
+                except Exception as e:
+                    logger.warning("Failed to spawn ssh proxy: %s", e)
+
+        # ProxyJump / ProxyCommand support from ~/.ssh/config
+        sock = self._build_proxy_sock(cfg, timeout=timeout)
+        if sock is not None:
+            connect_kwargs["sock"] = sock
+
         if conn.auth_type == "key":
             if conn.key_path:
                 connect_kwargs["key_filename"] = conn.key_path
+            elif cfg.get("identityfile"):
+                connect_kwargs["key_filename"] = cfg["identityfile"]
+            else:
+                # Mimic OpenSSH: try every default key that actually exists on disk.
+                default_keys = self._discover_default_keys()
+                if default_keys:
+                    connect_kwargs["key_filename"] = default_keys
         elif conn.auth_type == "password":
             if conn.password_enc:
                 connect_kwargs["password"] = self._crypto.decrypt(conn.password_enc)
-        client.connect(**connect_kwargs)
-        logger.info("SSH connected to %s:%s", conn.host, conn.port)
+            connect_kwargs["look_for_keys"] = False
+            connect_kwargs["allow_agent"] = False
+
+        try:
+            client.connect(**connect_kwargs)
+        except paramiko.AuthenticationException:
+            raise
+        logger.info(
+            "SSH connected to %s@%s:%s (alias=%s)",
+            username, host, port, conn.host,
+        )
         return client
+
+    @staticmethod
+    def _has_system_ssh() -> bool:
+        import shutil
+        return shutil.which("ssh") is not None
+
+    @staticmethod
+    def _spawn_ssh_proxy(host: str, port: int, username: str, timeout: int):
+        """Spawn `ssh -W host:port` and wrap its stdio as a paramiko sock.
+
+        Why: paramiko 5.0 macOS wheels lack GSSAPI; system OpenSSH has it
+        and is already configured to log in. We let it perform a *netcat-mode*
+        connection (-W) and use it as the transport pipe.
+        """
+        import shlex as _sh
+        cmd = (
+            f"ssh -o ConnectTimeout={timeout} "
+            f"-o ServerAliveInterval=15 "
+            f"-o BatchMode=yes "
+            f"-W {_sh.quote(host)}:{port} "
+            f"-p {port} "
+            f"{_sh.quote(username)}@{_sh.quote(host)}"
+        )
+        return paramiko.ProxyCommand(cmd)
+
+    @staticmethod
+    def _gssapi_available() -> bool:
+        """Check if GSSAPI (Kerberos) authentication is usable on this machine."""
+        try:
+            import gssapi  # noqa: F401
+        except Exception:
+            return False
+        # Need a usable Kerberos credential (ticket) to actually authenticate.
+        try:
+            import gssapi as _g
+            creds = _g.Credentials(usage="initiate")
+            # If lifetime is 0 or raises, we have no valid ticket.
+            return bool(creds.lifetime and creds.lifetime > 0)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _discover_default_keys() -> list[str]:
+        """Return existing default private keys in ~/.ssh, in OpenSSH's order."""
+        ssh_dir = Path.home() / ".ssh"
+        names = [
+            "id_ed25519", "id_ed25519_sk",
+            "id_ecdsa", "id_ecdsa_sk",
+            "id_rsa",
+            "id_xmss", "id_dsa",
+        ]
+        found = []
+        for n in names:
+            p = ssh_dir / n
+            if p.is_file():
+                found.append(str(p))
+        return found
+
+    @staticmethod
+    def _load_ssh_config_for(host_alias: str) -> dict:
+        """Read ~/.ssh/config and return the resolved entry for host_alias."""
+        cfg_path = Path.home() / ".ssh" / "config"
+        if not cfg_path.is_file():
+            return {}
+        try:
+            ssh_cfg = paramiko.SSHConfig()
+            with open(cfg_path, "r", encoding="utf-8") as fh:
+                ssh_cfg.parse(fh)
+            return ssh_cfg.lookup(host_alias) or {}
+        except Exception as e:
+            logger.warning("parse ssh config failed: %s", e)
+            return {}
+
+    @staticmethod
+    def _build_proxy_sock(cfg: dict, timeout: int):
+        """Honor ProxyJump / ProxyCommand from ssh_config when present."""
+        proxy_cmd = cfg.get("proxycommand")
+        proxy_jump = cfg.get("proxyjump")
+        if proxy_jump and not proxy_cmd:
+            proxy_cmd = f"ssh -W %h:%p {proxy_jump}"
+        if not proxy_cmd:
+            return None
+        try:
+            host = cfg.get("hostname", "")
+            port = str(cfg.get("port", "22"))
+            cmd = (proxy_cmd
+                   .replace("%h", host)
+                   .replace("%p", port)
+                   .replace("%r", cfg.get("user", "")))
+            logger.info("Using SSH proxy command: %s", cmd)
+            return paramiko.ProxyCommand(cmd)
+        except Exception as e:
+            logger.warning("build proxy sock failed: %s", e)
+            return None
 
     @staticmethod
     def _is_alive(client: paramiko.SSHClient) -> bool:

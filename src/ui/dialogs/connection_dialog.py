@@ -227,6 +227,20 @@ class ConnectionDialog(QDialog):
             info.setStyleSheet("color: #cdd6f4; font-size: 12px; font-weight: 500;")
             row_layout.addWidget(info, stretch=1)
 
+            test_btn = QPushButton("测试")
+            test_btn.setFixedWidth(50)
+            test_btn.setStyleSheet(
+                "QPushButton { background: none; border: 1px solid #3a3a55;"
+                "color: #74c7ec; border-radius: 3px; padding: 2px 8px;"
+                "font-size: 11px; }"
+                "QPushButton:hover { background: #74c7ec; color: #1e1e2e; }"
+                "QPushButton:disabled { color: #6c7086; border-color: #3a3a55; }"
+            )
+            test_btn.clicked.connect(
+                lambda checked=False, c=conn, b=test_btn: self._test_existing(c, b)
+            )
+            row_layout.addWidget(test_btn)
+
             del_btn = QPushButton("删除")
             del_btn.setFixedWidth(50)
             del_btn.setStyleSheet(
@@ -241,6 +255,36 @@ class ConnectionDialog(QDialog):
             row_layout.addWidget(del_btn)
 
             self._list_layout.insertWidget(self._list_layout.count() - 1, row)
+
+    def _test_existing(self, conn: Connection, btn: QPushButton):
+        """Test an already-saved connection from the list row."""
+        self._stop_test_worker()
+        original = btn.text()
+        btn.setEnabled(False)
+        btn.setText("测试中...")
+
+        worker = _TestWorker(self._ssh, conn, parent=self)
+        self._test_worker = worker
+
+        def _done(ok: bool, msg: str, b=btn, t=original):
+            try:
+                b.setEnabled(True)
+                b.setText(t)
+            except RuntimeError:
+                pass
+            if ok:
+                QMessageBox.information(
+                    self, "测试结果",
+                    f"连接 {conn.name} ({conn.username}@{conn.host}:{conn.port}) 成功！",
+                )
+            else:
+                QMessageBox.critical(
+                    self, "测试失败",
+                    f"连接 {conn.name} 失败：\n{msg}",
+                )
+
+        worker.result.connect(_done)
+        worker.start()
 
     def _delete_conn(self, conn_id: str):
         ConnectionModel.delete(conn_id)
