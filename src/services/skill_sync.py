@@ -1,7 +1,9 @@
 """Skill 同步引擎：备份、原子复制、校验、回滚 (F4)"""
 
+import io
 import os
 import shutil
+import tarfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -84,20 +86,21 @@ class SkillSyncService:
                    source_project, target_project,
                    source_conn, target_conn) -> Optional[SyncTask]:
         """Create a single sync task. Returns None if the mapping is N/A."""
+        source_level, target_level = self._resolve_levels(sync_level)
         # resolve source and target paths
         if direction == SYNC_DIRECTION_PUSH:
             source_path = skill.path
             source_device = "local" if skill.device_type == "local" else skill.device
             target_device = target_conn.name if target_conn else "local"
             target_path = self._resolve_target_path(
-                skill, target_tool, sync_level, target_project
+                skill.name, target_tool, sync_level, target_project, target_conn
             )
         else:  # pull
             source_path = skill.path
             source_device = skill.device
             target_device = "local"
             target_path = self._resolve_target_path(
-                skill, target_tool, sync_level, target_project
+                skill.name, target_tool, sync_level, target_project, target_conn
             )
 
         if not target_path:
@@ -113,33 +116,53 @@ class SkillSyncService:
             target_tool=target_tool,
             is_dir=skill.is_dir,
             expected_hash=skill.hash or "",
-            source_level=skill.level,
-            target_level=("project" if sync_level in (
-                "global_to_project", "project_to_global", "project_to_project"
-            ) and sync_level != "global_to_global" else "global"),
-            source_project_id=skill.project_id,
-            target_project_id=target_project.id if target_project else None,
+            source_level=source_level,
+            target_level=target_level,
+            source_project_id=skill.project_id if source_level == "project" else None,
+            target_project_id=target_project.id if target_level == "project" and target_project else None,
         )
 
-    def _resolve_target_path(self, skill: SkillInfo, target_tool: str,
+    def _resolve_target_path(self, skill_name: str, target_tool: str,
                              sync_level: str,
-                             target_project: Optional[Project]) -> str:
+                             target_project: Optional[Project],
+                             target_conn: Optional[Connection]) -> str:
         """Resolve target filesystem path for a skill."""
         from src.config import GLOBAL_SKILL_PATHS, PROJECT_SKILL_SUBDIRS
 
         if sync_level in ("global_to_global", "project_to_global"):
             # target is global
-            base = GLOBAL_SKILL_PATHS.get(target_tool)
-            return str(base / skill.name) if base else ""
+            if target_conn:
+                remote_home = self._ssh.get_remote_home(target_conn)
+                base = Path(remote_home) / f".{target_tool}" / "skills"
+                if target_tool == "cc-switch":
+                    base = Path(remote_home) / ".cc-switch" / "skills"
+            else:
+                base = GLOBAL_SKILL_PATHS.get(target_tool)
+            return str(base / skill_name) if base else ""
 
         if sync_level in ("global_to_project", "project_to_project"):
             if not target_project:
                 return ""
             subdir = PROJECT_SKILL_SUBDIRS.get(target_tool, "")
-            base = Path(target_project.local_path) / subdir
-            return str(base / skill.name)
+            if target_conn:
+                if not target_project.remote_path:
+                    return ""
+                base = Path(target_project.remote_path) / subdir
+            else:
+                base = Path(target_project.local_path) / subdir
+            return str(base / skill_name)
 
         return ""
+
+    @staticmethod
+    def _resolve_levels(sync_level: str) -> tuple[str, str]:
+        mapping = {
+            "global_to_global": ("global", "global"),
+            "global_to_project": ("global", "project"),
+            "project_to_global": ("project", "global"),
+            "project_to_project": ("project", "project"),
+        }
+        return mapping.get(sync_level, ("global", "global"))
 
     # ---- Execution ----
 
@@ -157,6 +180,7 @@ class SkillSyncService:
         total = len(tasks)
 
         for i, task in enumerate(tasks):
+            backup_path = ""
             # check conflict
             if self._target_exists(task, target_connection):
                 if conflict_strategy == "skip":
@@ -198,6 +222,7 @@ class SkillSyncService:
 
             except Exception as e:
                 logger.error(f"Sync failed for {task.skill_name}: {e}")
+                self._restore_backup(backup_path, task.target_path, target_connection)
                 self._record(task, "failed", str(e))
                 results.append(SyncResult(task, "failed", str(e)))
                 if on_progress:
@@ -223,15 +248,20 @@ class SkillSyncService:
         backup_dir = BACKUP_DIR / ts
         backup_dir.mkdir(parents=True, exist_ok=True)
         backup_path = str(backup_dir / task.skill_name)
+        if task.is_dir:
+            backup_path = f"{backup_path}.tar.gz"
 
         try:
-            if target_conn:
-                # remote backup: download to local
+            if task.is_dir:
+                if target_conn:
+                    data = self._ssh.download_directory(target_conn, task.target_path)
+                else:
+                    data = self._archive_local_dir(task.target_path)
+                Path(backup_path).write_bytes(data)
+            elif target_conn:
                 data = self._ssh.read_file(target_conn, task.target_path)
                 Path(backup_path).parent.mkdir(parents=True, exist_ok=True)
                 Path(backup_path).write_bytes(data)
-            elif task.is_dir:
-                shutil.copytree(task.target_path, backup_path)
             else:
                 shutil.copy2(task.target_path, backup_path)
         except Exception as e:
@@ -246,12 +276,14 @@ class SkillSyncService:
             return
         try:
             self._delete_target(target_path, target_conn)
-            if target_conn:
+            if target_conn and backup_path.endswith(".tar.gz"):
+                self._ssh.extract_archive(target_conn, Path(backup_path).read_bytes(), target_path)
+            elif target_conn:
                 data = Path(backup_path).read_bytes()
                 self._ssh.mkdir_p(target_conn, str(Path(target_path).parent))
                 self._ssh.write_file(target_conn, target_path, data)
-            elif Path(backup_path).is_dir():
-                shutil.copytree(backup_path, target_path)
+            elif backup_path.endswith(".tar.gz"):
+                self._extract_local_archive(Path(backup_path).read_bytes(), target_path)
             else:
                 shutil.copy2(backup_path, target_path)
         except Exception as e:
@@ -273,16 +305,28 @@ class SkillSyncService:
         # copy via appropriate method
         if source_conn and target_conn:
             # remote → remote (two-hop via local)
-            data = self._ssh.read_file(source_conn, task.source_path)
-            self._ssh.write_file(target_conn, tmp_target, data)
+            if task.is_dir:
+                data = self._ssh.download_directory(source_conn, task.source_path)
+                self._ssh.extract_archive(target_conn, data, tmp_target)
+            else:
+                data = self._ssh.read_file(source_conn, task.source_path)
+                self._ssh.write_file(target_conn, tmp_target, data)
         elif source_conn:
             # remote → local
-            data = self._ssh.read_file(source_conn, task.source_path)
-            Path(tmp_target).write_bytes(data)
+            if task.is_dir:
+                data = self._ssh.download_directory(source_conn, task.source_path)
+                self._extract_local_archive(data, tmp_target)
+            else:
+                data = self._ssh.read_file(source_conn, task.source_path)
+                Path(tmp_target).write_bytes(data)
         elif target_conn:
             # local → remote
-            data = Path(task.source_path).read_bytes() if not task.is_dir else self._tar_local_dir(task.source_path)
-            self._ssh.write_file(target_conn, tmp_target, data)
+            if task.is_dir:
+                data = self._archive_local_dir(task.source_path)
+                self._ssh.extract_archive(target_conn, data, tmp_target)
+            else:
+                data = Path(task.source_path).read_bytes()
+                self._ssh.write_file(target_conn, tmp_target, data)
         else:
             # local → local
             if task.is_dir:
@@ -295,9 +339,7 @@ class SkillSyncService:
             c in '0123456789abcdef' for c in task.expected_hash
         ):
             if target_conn:
-                actual = SkillHasher.compute_local_hash(
-                    self._download_temp(target_conn, tmp_target)
-                )
+                actual = self._ssh.compute_remote_hash(target_conn, tmp_target)
             else:
                 actual = SkillHasher.compute_local_hash(tmp_target)
             if actual and actual != task.expected_hash:
@@ -308,6 +350,7 @@ class SkillSyncService:
 
         # rename temp → actual (atomic)
         if target_conn:
+            self._delete_target(task.target_path, target_conn)
             self._ssh.rename(target_conn, tmp_target, task.target_path)
         else:
             # remove existing first
@@ -368,21 +411,20 @@ class SkillSyncService:
             pass
 
     @staticmethod
-    def _tar_local_dir(path: str) -> bytes:
-        import tempfile
-        tmp = Path(tempfile.mktemp(suffix=".tar.gz"))
-        shutil.make_archive(str(tmp.with_suffix("")), "gztar",
-                            Path(path).parent, Path(path).name)
-        data = tmp.read_bytes()
-        tmp.unlink(missing_ok=True)
-        return data
+    def _archive_local_dir(path: str) -> bytes:
+        buffer = io.BytesIO()
+        root = Path(path)
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            for entry in sorted(root.rglob("*")):
+                tar.add(entry, arcname=entry.relative_to(root))
+        return buffer.getvalue()
 
-    def _download_temp(self, conn: Connection, remote_path: str) -> str:
-        import tempfile
-        tmp = Path(tempfile.mktemp())
-        data = self._ssh.read_file(conn, remote_path)
-        tmp.write_bytes(data)
-        return str(tmp)
+    @staticmethod
+    def _extract_local_archive(data: bytes, target_path: str):
+        target = Path(target_path)
+        target.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+            tar.extractall(target)
 
     @staticmethod
     def _rename_for_keep(target_path: str) -> str:

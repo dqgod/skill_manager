@@ -273,11 +273,10 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _on_project_changed(self):
+        for item_id in list(self._sidebar._nav_items.keys()):
+            if item_id != "global":
+                self._sidebar.remove_project_nav(item_id)
         self._projects = ProjectModel.get_all()
-        # clear existing project nav items
-        for proj in ProjectModel.get_all():
-            self._sidebar.remove_project_nav(proj.id)
-        # re-add
         for proj in self._projects:
             self._sidebar.add_project_nav(proj.id, proj.name)
         self._toast.show_message("项目列表已更新")
@@ -311,9 +310,25 @@ class MainWindow(QMainWindow):
         else:
             source_conn = self._active_connection
 
+        active_project = next(
+            (p for p in self._projects if p.id == self._sidebar.active_view),
+            None,
+        )
+        source_project = None
+        target_project = None
+        if sync_level == SYNC_LEVEL_TO_PROJECT:
+            target_project = active_project
+        elif sync_level == SYNC_LEVEL_TO_GLOBAL:
+            source_project = active_project
+        elif sync_level == SYNC_LEVEL_PROJECT:
+            source_project = active_project
+            target_project = active_project
+
         # prepare tasks
         tasks = self._sync_svc.prepare_tasks(
             selected, direction, sync_level, target_tools,
+            source_project=source_project,
+            target_project=target_project,
             source_connection=source_conn,
             target_connection=target_conn,
         )
@@ -340,7 +355,8 @@ class MainWindow(QMainWindow):
     def _on_sync_progress(self, cur: int, total: int, name: str, status: str):
         if hasattr(self, '_sync_dialog'):
             self._sync_dialog.update_item(name, status)
-            self._sync_dialog.set_progress(cur + 1 if status == "success" else cur)
+            if status in ("success", "failed", "skipped"):
+                self._sync_dialog.set_progress(cur + 1)
 
     def _on_sync_conflict(self, task):
         dlg = ConflictDialog(task.skill_name, self._sync_dialog)

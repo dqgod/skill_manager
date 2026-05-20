@@ -30,6 +30,16 @@ class TestSkillHasher:
         # deterministic
         assert h == SkillHasher.compute_local_hash(str(d))
 
+    def test_compute_local_hash_directory_changes_with_filename(self, tmp_path):
+        left = tmp_path / "left"
+        right = tmp_path / "right"
+        left.mkdir()
+        right.mkdir()
+        (left / "a.txt").write_text("same")
+        (right / "b.txt").write_text("same")
+
+        assert SkillHasher.compute_local_hash(str(left)) != SkillHasher.compute_local_hash(str(right))
+
     def test_compute_local_hash_nonexistent(self, tmp_path):
         h = SkillHasher.compute_local_hash(str(tmp_path / "nope"))
         assert h == ""

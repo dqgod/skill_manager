@@ -1,9 +1,12 @@
 """SSH 连接管理器：连接池、sftp、远程哈希计算 (F5)"""
 
+import hashlib
 import shlex
 import stat
 import time
+import uuid
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Optional
 
 import paramiko
@@ -13,6 +16,7 @@ from src.services.crypto_service import CryptoService
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
 @dataclass
@@ -104,43 +108,41 @@ class SSHManager:
             except FileNotFoundError:
                 logger.info("Remote path does not exist: %s", remote_path)
                 return []
-            results = []
-            for a in attrs:
-                results.append(RemoteFileInfo(
-                    name=a.filename,
-                    path=f"{remote_path}/{a.filename}",
-                    is_dir=stat.S_ISDIR(a.st_mode),
-                    size=a.st_size if not stat.S_ISDIR(a.st_mode) else 0,
-                    modified_at=a.st_mtime,
-                ))
-            logger.debug("list_dir %s: %d entries", remote_path, len(results))
-            return results
+            try:
+                results = []
+                for a in attrs:
+                    results.append(RemoteFileInfo(
+                        name=a.filename,
+                        path=f"{remote_path}/{a.filename}",
+                        is_dir=stat.S_ISDIR(a.st_mode),
+                        size=a.st_size if not stat.S_ISDIR(a.st_mode) else 0,
+                        modified_at=a.st_mtime,
+                    ))
+                logger.debug("list_dir %s: %d entries", remote_path, len(results))
+                return results
+            finally:
+                sftp.close()
         except Exception as e:
             logger.warning("list_dir failed for %s: %s", remote_path, e)
             return []
 
     def compute_remote_hash(self, conn: Connection, remote_path: str) -> str:
         """Compute deterministic SHA-256 hash of a remote file or directory."""
-        client = self.get_client(conn)
         try:
-            # try file first
-            stdin, stdout, stderr = client.exec_command(
-                f'sha256sum {shlex.quote(remote_path)} 2>/dev/null | cut -d" " -f1',
-                timeout=30,
-            )
-            result = stdout.read().decode().strip()
-            if result:
-                return result
-
-            # directory: hash all files sorted
+            quoted = shlex.quote(remote_path)
             cmd = (
-                f'cd {shlex.quote(remote_path)} 2>/dev/null && '
-                f'find . -type f -print0 2>/dev/null | sort -z | '
-                f'xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d" " -f1'
+                f"if [ -f {quoted} ]; then "
+                f"sha256sum {quoted} | cut -d' ' -f1; "
+                f"elif [ -d {quoted} ]; then "
+                f"cd {quoted} && "
+                f"if find . -type f -print -quit | grep -q .; then "
+                f"find . -type f -print0 | sort -z | "
+                f"xargs -0 sha256sum | sha256sum | cut -d' ' -f1; "
+                f"else printf '{EMPTY_SHA256}'; fi; "
+                f"else printf ''; fi"
             )
-            stdin, stdout, stderr = client.exec_command(cmd, timeout=30)
-            result = stdout.read().decode().strip()
-            return result if result else ""
+            result = self._run_command(conn, cmd, timeout=30).strip()
+            return result
         except Exception as e:
             logger.warning(f"compute_remote_hash failed for {remote_path}: {e}")
             return ""
@@ -149,8 +151,11 @@ class SSHManager:
         client = self.get_client(conn)
         try:
             sftp = client.open_sftp()
-            sftp.stat(remote_path)
-            return True
+            try:
+                sftp.stat(remote_path)
+                return True
+            finally:
+                sftp.close()
         except FileNotFoundError:
             return False
         except Exception:
@@ -159,22 +164,34 @@ class SSHManager:
     def read_file(self, conn: Connection, remote_path: str) -> bytes:
         client = self.get_client(conn)
         sftp = client.open_sftp()
-        with sftp.file(remote_path, "rb") as f:
-            return f.read()
+        try:
+            with sftp.file(remote_path, "rb") as f:
+                return f.read()
+        finally:
+            sftp.close()
 
     def write_file(self, conn: Connection, remote_path: str, data: bytes):
         client = self.get_client(conn)
         sftp = client.open_sftp()
-        with sftp.file(remote_path, "wb") as f:
-            f.write(data)
+        try:
+            with sftp.file(remote_path, "wb") as f:
+                f.write(data)
+        finally:
+            sftp.close()
 
     def mkdir_p(self, conn: Connection, remote_path: str):
-        client = self.get_client(conn)
-        client.exec_command(f'mkdir -p {shlex.quote(remote_path)}', timeout=10)
+        self._run_command(
+            conn,
+            f'mkdir -p {shlex.quote(remote_path)}',
+            timeout=10,
+        )
 
     def delete(self, conn: Connection, remote_path: str):
-        client = self.get_client(conn)
-        client.exec_command(f'rm -rf {shlex.quote(remote_path)}', timeout=10)
+        self._run_command(
+            conn,
+            f'rm -rf {shlex.quote(remote_path)}',
+            timeout=10,
+        )
 
     def get_remote_home(self, conn: Connection) -> str:
         """Resolve the remote user's home directory via SSH."""
@@ -187,7 +204,42 @@ class SSHManager:
     def rename(self, conn: Connection, old_path: str, new_path: str):
         client = self.get_client(conn)
         sftp = client.open_sftp()
-        sftp.rename(old_path, new_path)
+        try:
+            sftp.rename(old_path, new_path)
+        finally:
+            sftp.close()
+
+    def download_directory(self, conn: Connection, remote_path: str) -> bytes:
+        """Return a .tar.gz archive containing the directory contents."""
+        quoted = shlex.quote(remote_path)
+        cmd = (
+            f"if [ -d {quoted} ]; then "
+            f"tar -C {quoted} -czf - .; "
+            f"else printf ''; fi"
+        )
+        return self._run_command(conn, cmd, timeout=60, binary=True)
+
+    def extract_archive(self, conn: Connection, archive_data: bytes,
+                        remote_target_path: str):
+        """Extract a .tar.gz archive into remote_target_path."""
+        target = PurePosixPath(remote_target_path)
+        parent = str(target.parent)
+        archive_name = f".skill-sync-{uuid.uuid4().hex[:8]}.tar.gz"
+        remote_archive = str(target.parent / archive_name)
+        self.mkdir_p(conn, parent)
+        self.write_file(conn, remote_archive, archive_data)
+        try:
+            cmd = (
+                f"mkdir -p {shlex.quote(remote_target_path)} && "
+                f"tar -xzf {shlex.quote(remote_archive)} "
+                f"-C {shlex.quote(remote_target_path)}"
+            )
+            self._run_command(conn, cmd, timeout=60)
+        finally:
+            try:
+                self.delete(conn, remote_archive)
+            except Exception:
+                logger.warning("Failed to cleanup remote archive: %s", remote_archive)
 
     # ---- Internal ----
 
@@ -216,3 +268,19 @@ class SSHManager:
     def _is_alive(client: paramiko.SSHClient) -> bool:
         transport = client.get_transport()
         return transport is not None and transport.is_active()
+
+    def _run_command(self, conn: Connection, command: str, *,
+                     timeout: int = 30, binary: bool = False):
+        client = self.get_client(conn)
+        _, stdout, stderr = client.exec_command(command, timeout=timeout)
+        exit_code = stdout.channel.recv_exit_status()
+        out = stdout.read()
+        err = stderr.read()
+        if exit_code != 0:
+            raise RuntimeError(
+                f"remote command failed (rc={exit_code}): "
+                f"{err.decode(errors='replace').strip() or command}"
+            )
+        if binary:
+            return out
+        return out.decode().strip()

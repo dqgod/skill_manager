@@ -1,7 +1,11 @@
 """测试 SkillSyncService（仅本地同步，不依赖 SSH）"""
 
+import io
+import tarfile
 from pathlib import Path
 
+from src.models.connection import Connection
+from src.models.project import Project
 from src.services.skill_hasher import SkillHasher
 from src.services.skill_sync import SkillSyncService, SyncTask
 from src.services.skill_scanner import SkillInfo
@@ -22,6 +26,66 @@ def _make_task(skill_name, source_path, target_path, **kwargs):
                     target_path=target_path, **defaults)
 
 
+class FakeSSHManager:
+    def __init__(self, remote_root: Path):
+        self.remote_root = remote_root
+        self.remote_root.mkdir(parents=True, exist_ok=True)
+
+    def get_remote_home(self, conn):
+        return "/home/tester"
+
+    def _real(self, remote_path: str) -> Path:
+        return self.remote_root / remote_path.lstrip("/")
+
+    def file_exists(self, conn, remote_path: str) -> bool:
+        return self._real(remote_path).exists()
+
+    def read_file(self, conn, remote_path: str) -> bytes:
+        return self._real(remote_path).read_bytes()
+
+    def write_file(self, conn, remote_path: str, data: bytes):
+        real = self._real(remote_path)
+        real.parent.mkdir(parents=True, exist_ok=True)
+        real.write_bytes(data)
+
+    def mkdir_p(self, conn, remote_path: str):
+        self._real(remote_path).mkdir(parents=True, exist_ok=True)
+
+    def delete(self, conn, remote_path: str):
+        real = self._real(remote_path)
+        if real.is_dir():
+            import shutil
+            shutil.rmtree(real, ignore_errors=True)
+        elif real.exists():
+            real.unlink()
+
+    def rename(self, conn, old_path: str, new_path: str):
+        old_real = self._real(old_path)
+        new_real = self._real(new_path)
+        new_real.parent.mkdir(parents=True, exist_ok=True)
+        old_real.rename(new_real)
+
+    def compute_remote_hash(self, conn, remote_path: str) -> str:
+        return SkillHasher.compute_local_hash(str(self._real(remote_path)))
+
+    def download_directory(self, conn, remote_path: str) -> bytes:
+        return self._archive_dir(self._real(remote_path))
+
+    def extract_archive(self, conn, archive_data: bytes, remote_target_path: str):
+        target = self._real(remote_target_path)
+        target.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(archive_data), mode="r:gz") as tar:
+            tar.extractall(target)
+
+    @staticmethod
+    def _archive_dir(path: Path) -> bytes:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            for entry in sorted(path.rglob("*")):
+                tar.add(entry, arcname=entry.relative_to(path))
+        return buffer.getvalue()
+
+
 class TestSyncService:
     def test_prepare_tasks_push(self):
         svc = SkillSyncService(None, SkillHasher())
@@ -36,6 +100,46 @@ class TestSyncService:
         )
         assert len(tasks) == 1
         assert tasks[0].skill_name == "test-skill"
+
+    def test_prepare_tasks_push_remote_global_uses_remote_home(self, tmp_path):
+        ssh = FakeSSHManager(tmp_path / "remote")
+        svc = SkillSyncService(ssh, SkillHasher(ssh))
+        conn = Connection(name="srv", host="127.0.0.1")
+        skill = SkillInfo(
+            name="test-skill", tool="claude",
+            path="/tmp/src/skill", level="global",
+            device="local", device_type="local",
+        )
+        tasks = svc.prepare_tasks(
+            [skill], SYNC_DIRECTION_PUSH, "global_to_global",
+            ["claude"], target_connection=conn
+        )
+        assert tasks[0].target_path == "/home/tester/.claude/skills/test-skill"
+
+    def test_prepare_tasks_project_levels_and_remote_project_path(self, tmp_path):
+        ssh = FakeSSHManager(tmp_path / "remote")
+        svc = SkillSyncService(ssh, SkillHasher(ssh))
+        conn = Connection(name="srv", host="127.0.0.1")
+        project = Project(
+            name="proj",
+            local_path=str(tmp_path / "local-proj"),
+            remote_path="/workspace/proj",
+            tools="claude",
+        )
+        skill = SkillInfo(
+            name="proj-skill", tool="claude",
+            path="/tmp/src/proj-skill", level="project",
+            device="local", device_type="local", project_id=project.id,
+        )
+        tasks = svc.prepare_tasks(
+            [skill], SYNC_DIRECTION_PUSH, "project_to_project",
+            ["claude"], source_project=project, target_project=project,
+            target_connection=conn,
+        )
+        assert tasks[0].source_level == "project"
+        assert tasks[0].target_level == "project"
+        assert tasks[0].target_project_id == project.id
+        assert tasks[0].target_path == "/workspace/proj/.claude/skills/proj-skill"
 
     def test_local_copy_file(self, tmp_path):
         svc = SkillSyncService(None, SkillHasher())
@@ -62,6 +166,52 @@ class TestSyncService:
                           is_dir=True)
         results = svc.execute([task], conflict_strategy="overwrite")
         assert results[0].status == "success"
+
+    def test_local_to_remote_copy_directory(self, tmp_path):
+        ssh = FakeSSHManager(tmp_path / "remote")
+        svc = SkillSyncService(ssh, SkillHasher(ssh))
+        conn = Connection(name="srv", host="127.0.0.1")
+        src_dir = tmp_path / "source" / "my-skill"
+        src_dir.mkdir(parents=True)
+        (src_dir / "SKILL.md").write_text("# skill")
+        (src_dir / "main.py").write_text("print('hello')")
+
+        task = _make_task(
+            "my-skill",
+            str(src_dir),
+            "/home/tester/.claude/skills/my-skill",
+            is_dir=True,
+            expected_hash=SkillHasher.compute_local_hash(str(src_dir)),
+        )
+        results = svc.execute([task], target_connection=conn, conflict_strategy="overwrite")
+        remote_dir = ssh._real("/home/tester/.claude/skills/my-skill")
+        assert results[0].status == "success"
+        assert (remote_dir / "SKILL.md").read_text() == "# skill"
+        assert (remote_dir / "main.py").read_text() == "print('hello')"
+
+    def test_remote_to_local_copy_directory(self, tmp_path):
+        ssh = FakeSSHManager(tmp_path / "remote")
+        svc = SkillSyncService(ssh, SkillHasher(ssh))
+        conn = Connection(name="srv", host="127.0.0.1")
+        remote_dir = ssh._real("/home/tester/.claude/skills/my-skill")
+        remote_dir.mkdir(parents=True)
+        (remote_dir / "SKILL.md").write_text("# remote skill")
+        (remote_dir / "README.md").write_text("hello")
+        dst = tmp_path / "local"
+
+        task = _make_task(
+            "my-skill",
+            "/home/tester/.claude/skills/my-skill",
+            str(dst / "my-skill"),
+            is_dir=True,
+            source_device="srv",
+            target_device="local",
+            expected_hash=SkillHasher.compute_local_hash(str(remote_dir)),
+        )
+        results = svc.execute([task], source_connection=conn, conflict_strategy="overwrite")
+        assert results[0].status == "success"
+        assert (dst / "my-skill" / "SKILL.md").read_text() == "# remote skill"
+        assert (dst / "my-skill" / "README.md").read_text() == "hello"
 
     def test_conflict_skip(self, tmp_path):
         svc = SkillSyncService(None, SkillHasher())

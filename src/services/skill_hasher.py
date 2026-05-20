@@ -178,11 +178,12 @@ class SkillHasher:
 
     @staticmethod
     def _hash_directory(path: Path) -> str:
-        """Deterministic directory hash: sort files, hash each, concatenate."""
+        """Deterministic directory hash based on relative paths and file hashes."""
         files = sorted(f for f in path.rglob("*") if f.is_file())
         if not files:
             return hashlib.sha256(b"").hexdigest()
         combined = hashlib.sha256()
         for f in files:
-            combined.update(SkillHasher._hash_file(f).encode())
+            rel = f.relative_to(path).as_posix()
+            combined.update(f"{SkillHasher._hash_file(f)}  ./{rel}\n".encode())
         return combined.hexdigest()
