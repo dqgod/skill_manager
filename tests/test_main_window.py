@@ -1,9 +1,11 @@
 """测试 MainWindow 的无 UI 业务方法"""
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import src.ui.main_window as main_window_module
 from src.models.project import Project
+from src.services.skill_scanner import SkillInfo
 from src.ui.main_window import MainWindow
 
 
@@ -70,3 +72,84 @@ def test_on_sync_progress_advances_on_failed_and_skipped():
 
     assert dialog.updated == [("skill-a", "failed"), ("skill-b", "skipped")]
     assert dialog.progress == [2, 3]
+
+
+# ---- Hash-compare master switch + status chip ----
+
+
+def _mk_skill(name: str, tool: str = "codex", device_type: str = "local") -> SkillInfo:
+    return SkillInfo(
+        name=name, tool=tool, path=f"/tmp/{name}",
+        level="global", device="local", device_type=device_type,
+    )
+
+
+class _PanelsStub:
+    def __init__(self):
+        self.local_panel = MagicMock()
+        self.remote_panel = MagicMock()
+
+
+def _build_toggle_fake(enabled_initial: bool, has_skills: bool = True):
+    """Construct a SimpleNamespace mimicking just enough of MainWindow."""
+    settings = MagicMock()
+    settings.setValue = MagicMock()
+    panels = _PanelsStub()
+    locals_ = [_mk_skill("a"), _mk_skill("b")] if has_skills else []
+    remotes = [_mk_skill("a", device_type="remote")] if has_skills else []
+    fake = SimpleNamespace(
+        _hash_compare_enabled=enabled_initial,
+        _settings=settings,
+        _local_skills=locals_,
+        _remote_skills=remotes,
+        _panels=panels,
+        _active_connection=None,
+        _hasher=MagicMock(),
+        _set_status_chip=MagicMock(),
+        _finalize_worker=MagicMock(),
+        statusBar=MagicMock(return_value=MagicMock()),
+    )
+    fake._auto_compare = MagicMock(side_effect=lambda: MainWindow._auto_compare(fake))
+    return fake
+
+
+def test_hash_compare_toggle_off_marks_off_and_skips_compare():
+    fake = _build_toggle_fake(enabled_initial=True)
+    # Patch _auto_compare to assert it's NOT called when toggling OFF.
+    fake._auto_compare = MagicMock()
+
+    MainWindow._on_hash_compare_toggled(fake, False)
+
+    assert fake._hash_compare_enabled is False
+    assert all(s.hash == "off" for s in fake._local_skills)
+    assert all(s.hash == "off" for s in fake._remote_skills)
+    fake._settings.setValue.assert_called_with(
+        "ui/hash_compare_enabled", False
+    )
+    fake._auto_compare.assert_not_called()
+
+
+def test_hash_compare_toggle_on_triggers_compare():
+    fake = _build_toggle_fake(enabled_initial=False)
+    # Stub _auto_compare so we don't actually spin a thread.
+    fake._auto_compare = MagicMock()
+
+    MainWindow._on_hash_compare_toggled(fake, True)
+
+    assert fake._hash_compare_enabled is True
+    fake._settings.setValue.assert_called_with(
+        "ui/hash_compare_enabled", True
+    )
+    fake._auto_compare.assert_called_once()
+
+
+def test_auto_compare_short_circuits_when_disabled():
+    fake = _build_toggle_fake(enabled_initial=False)
+    fake._compare_worker = None
+    fake._hasher = MagicMock()
+    # Calling _auto_compare directly should NOT touch the hasher when off.
+    MainWindow._auto_compare(fake)
+    fake._hasher.compare.assert_not_called()
+    assert all(s.hash == "off" for s in fake._local_skills)
+    assert all(s.hash == "off" for s in fake._remote_skills)
+    fake._set_status_chip.assert_called()

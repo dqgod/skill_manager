@@ -2,9 +2,10 @@
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QStatusBar,
+    QCheckBox,
 )
 from PySide6.QtGui import QAction
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, QSettings
 
 from src.config import (
     ALL_TOOLS_STR, SYNC_DIRECTION_PUSH, SYNC_DIRECTION_PULL,
@@ -245,6 +246,20 @@ class MainWindow(QMainWindow):
         self._local_scan_seq = 0   # guard against stale local scan results
         self._remote_scan_seq = 0  # guard against stale remote scan results
 
+        # Hash-compare master switch (PR-Switch).
+        # Persisted across launches via QSettings.
+        self._settings = QSettings("skill_manager", "skill_manager")
+        self._hash_compare_enabled: bool = bool(
+            self._settings.value("ui/hash_compare_enabled", False, type=bool)
+        )
+
+        # Auto-fade timer for the status chip ("✓ 完成" reverts to idle).
+        self._chip_clear_timer = QTimer(self)
+        self._chip_clear_timer.setSingleShot(True)
+        self._chip_clear_timer.timeout.connect(
+            lambda: self._set_status_chip("idle")
+        )
+
         self._setup_ui()
         self._ensure_default_connection()
         self._load_projects()
@@ -281,6 +296,36 @@ class MainWindow(QMainWindow):
         hist_menu = menubar.addMenu("操作历史")
         hist_action = hist_menu.addAction("查看历史...")
         hist_action.triggered.connect(self._open_history_dialog)
+
+        # ----- top-right corner widget: hash-compare toggle + status chip -----
+        corner = QWidget()
+        corner_layout = QHBoxLayout(corner)
+        corner_layout.setContentsMargins(0, 0, 12, 0)
+        corner_layout.setSpacing(10)
+
+        self._hash_compare_check = QCheckBox("校验内容一致性")
+        self._hash_compare_check.setStyleSheet(
+            "QCheckBox { color: #a6adc8; font-size: 11px; spacing: 4px; }"
+            "QCheckBox::indicator { width: 13px; height: 13px; }"
+        )
+        self._hash_compare_check.setToolTip(
+            "打开后会计算并比较本机与远端 skill 的内容哈希；\n"
+            "关闭则跳过哈希计算，只展示列表，启动/刷新更快。"
+        )
+        self._hash_compare_check.setChecked(self._hash_compare_enabled)
+        self._hash_compare_check.toggled.connect(self._on_hash_compare_toggled)
+        corner_layout.addWidget(self._hash_compare_check)
+
+        self._status_chip = QLabel("")
+        self._status_chip.setStyleSheet(
+            "QLabel { font-size: 11px; padding: 2px 8px; border-radius: 8px;"
+            "color: #6c7086; background: transparent; }"
+        )
+        corner_layout.addWidget(self._status_chip)
+
+        menubar.setCornerWidget(corner, Qt.TopRightCorner)
+        self._set_status_chip("idle")
+        # ---------------------------------------------------------------------
 
         # main content
         content = QHBoxLayout()
@@ -534,7 +579,7 @@ class MainWindow(QMainWindow):
         self._local_scan_seq += 1
         seq = self._local_scan_seq
         self.statusBar().showMessage("正在扫描本机...")
-        self.setCursor(Qt.BusyCursor)
+        self._set_status_chip("scanning_local")
         self._local_worker = _LocalScanWorker(
             self._scanner, view_id, self._projects, parent=self,
         )
@@ -563,7 +608,7 @@ class MainWindow(QMainWindow):
         self._remote_scan_seq += 1
         seq = self._remote_scan_seq
         self.statusBar().showMessage("正在扫描远程...")
-        self.setCursor(Qt.BusyCursor)
+        self._set_status_chip("scanning_remote")
         self._remote_worker = _RemoteScanWorker(
             self._scanner, self._active_connection, view_id, self._projects,
             parent=self,
@@ -592,11 +637,11 @@ class MainWindow(QMainWindow):
         if seq != self._remote_scan_seq:
             return  # stale result
         self._finalize_worker("_remote_worker")
-        self.setCursor(Qt.ArrowCursor)
         self._remote_skills = []
         self._panels.remote_panel.display_skills([])
         self._update_badges("remote", [])
         self.statusBar().showMessage(f"远程扫描失败：{msg}")
+        self._set_status_chip("error", "远程扫描失败")
         # Mark the panel offline with the actual error reason.
         if self._active_connection:
             conn = self._active_connection
@@ -635,25 +680,34 @@ class MainWindow(QMainWindow):
         setattr(self, attr, None)
 
     def _on_scan_local_done(self, skills: list):
-        self.setCursor(Qt.ArrowCursor)
         self._local_skills = skills
         self._update_badges("local", skills)
-        if self._remote_skills:
-            self._auto_compare()
-        else:
-            # No remote data yet — mark all as local-only
+        # Always render local list immediately so the UI doesn't look frozen.
+        if self._hash_compare_enabled:
+            # Show "loading" tag until _auto_compare finishes.
             for s in self._local_skills:
-                s.hash = "local-only"
-            self._panels.local_panel.display_skills(self._local_skills)
-        # Always render local list immediately so the UI doesn't look frozen;
-        # _auto_compare may re-render later with status tags.
+                if s.hash is None:
+                    s.hash = "loading"
+        else:
+            for s in self._local_skills:
+                s.hash = "off"
         self._panels.local_panel.display_skills(self._local_skills)
         self.statusBar().showMessage(f"本机扫描完成，{len(skills)} 个 skill")
         self._on_selection_changed()
         logger.info("Local scan completed: %d skills", len(skills))
 
+        if self._hash_compare_enabled and self._remote_skills:
+            self._auto_compare()
+        elif self._hash_compare_enabled:
+            # No remote yet — temporarily mark as local-only
+            for s in self._local_skills:
+                s.hash = "local-only"
+            self._panels.local_panel.display_skills(self._local_skills)
+            self._set_status_chip("done", f"✓ 本机 {len(skills)}")
+        else:
+            self._set_status_chip("done", f"✓ 本机 {len(skills)}（未校验）")
+
     def _on_scan_remote_done(self, skills: list):
-        self.setCursor(Qt.ArrowCursor)
         self._remote_skills = skills
         self._update_badges("remote", skills)
         # A successful scan implies the remote is reachable.
@@ -663,15 +717,28 @@ class MainWindow(QMainWindow):
                 "online",
                 f"已连接 {conn.username}@{conn.host}:{conn.port}",
             )
-        if self._local_skills:
-            self._auto_compare()
+        # Render immediately so users can interact while we crunch hashes.
+        if self._hash_compare_enabled:
+            for s in self._remote_skills:
+                if s.hash is None:
+                    s.hash = "loading"
         else:
             for s in self._remote_skills:
-                s.hash = "remote-only"
+                s.hash = "off"
         self._panels.remote_panel.display_skills(self._remote_skills)
         self.statusBar().showMessage(f"远程扫描完成，{len(skills)} 个 skill")
         self._on_selection_changed()
         logger.info("Remote scan completed: %d skills", len(skills))
+
+        if self._hash_compare_enabled and self._local_skills:
+            self._auto_compare()
+        elif self._hash_compare_enabled:
+            for s in self._remote_skills:
+                s.hash = "remote-only"
+            self._panels.remote_panel.display_skills(self._remote_skills)
+            self._set_status_chip("done", f"✓ 远程 {len(skills)}")
+        else:
+            self._set_status_chip("done", f"✓ 远程 {len(skills)}（未校验）")
 
     def _auto_compare(self):
         """Auto-compare local and remote skills off the UI thread.
@@ -681,9 +748,20 @@ class MainWindow(QMainWindow):
         inventories. Pushing it into a worker keeps the window responsive
         and lets users keep scrolling/clicking while we crunch.
         """
+        # Master switch: skip hashing entirely when disabled.
+        if not self._hash_compare_enabled:
+            for s in self._local_skills:
+                s.hash = "off"
+            for s in self._remote_skills:
+                s.hash = "off"
+            self._panels.local_panel.display_skills(self._local_skills)
+            self._panels.remote_panel.display_skills(self._remote_skills)
+            self._set_status_chip("done", "校验已关闭")
+            return
         # Cancel any in-flight comparison
         self._finalize_worker("_compare_worker")
         self.statusBar().showMessage("正在比对本机/远程 skill ...")
+        self._set_status_chip("comparing")
         self._compare_worker = _AutoCompareWorker(
             self._hasher,
             self._local_skills,
@@ -706,6 +784,7 @@ class MainWindow(QMainWindow):
             f"比对完成：{synced} 已同步 / {len(self._local_skills)} 本机 / "
             f"{len(self._remote_skills)} 远程"
         )
+        self._set_status_chip("done", f"✓ 已同步 {synced}/{len(self._local_skills)}")
 
     def _on_compare_failed(self, msg: str):
         self._finalize_worker("_compare_worker")
@@ -719,6 +798,7 @@ class MainWindow(QMainWindow):
         self._panels.local_panel.display_skills(self._local_skills)
         self._panels.remote_panel.display_skills(self._remote_skills)
         self.statusBar().showMessage(f"比对失败：{msg}")
+        self._set_status_chip("error", "比对失败")
         try:
             self._toast.show_message(f"比对失败：{msg}", success=False, duration=3000)
         except Exception:
@@ -783,6 +863,71 @@ class MainWindow(QMainWindow):
                 if s.project_id:
                     pc[s.project_id] = pc.get(s.project_id, 0) + 1
             self._sidebar.update_badges(global_count, pc)
+
+    # ---- Status chip + hash-compare toggle ----
+
+    def _set_status_chip(self, state: str, text: str = ""):
+        """Top-right corner chip — single source of truth for "what's busy now".
+
+        We removed the old window-wide BusyCursor (which made the whole UI
+        feel frozen) and surface progress here instead.
+
+        state ∈ {idle, scanning_local, scanning_remote, comparing, done, error}
+        """
+        styles = {
+            "idle": ("#6c7086", "transparent", text or "就绪"),
+            "scanning_local": ("#1e1e2e", "#f9e2af", text or "⟳ 扫描本机…"),
+            "scanning_remote": ("#1e1e2e", "#f9e2af", text or "⟳ 扫描远程…"),
+            "comparing": ("#1e1e2e", "#89dceb", text or "⟳ 比对哈希…"),
+            "done": ("#1e1e2e", "#a6e3a1", text or "✓ 完成"),
+            "error": ("#1e1e2e", "#f38ba8", text or "✗ 失败"),
+        }
+        fg, bg, label = styles.get(state, styles["idle"])
+        self._status_chip.setText(label)
+        self._status_chip.setStyleSheet(
+            f"QLabel {{ font-size: 11px; padding: 2px 8px; border-radius: 8px;"
+            f"color: {fg}; background: {bg}; }}"
+        )
+        # auto-fade "done" back to idle after 3s; cancel any pending fade
+        self._chip_clear_timer.stop()
+        if state == "done":
+            self._chip_clear_timer.start(3000)
+
+    def _on_hash_compare_toggled(self, checked: bool):
+        """User flipped the master switch; persist + re-render.
+
+        - ON  : trigger a fresh compare if both sides already loaded.
+        - OFF : cancel any in-flight comparator, mark all skills "off".
+        """
+        self._hash_compare_enabled = bool(checked)
+        try:
+            self._settings.setValue(
+                "ui/hash_compare_enabled", self._hash_compare_enabled
+            )
+        except Exception as e:  # pragma: no cover
+            logger.warning("Failed to persist hash_compare_enabled: %s", e)
+
+        if self._hash_compare_enabled:
+            if self._local_skills or self._remote_skills:
+                # Show loading tags during the upcoming compare
+                for s in self._local_skills:
+                    s.hash = "loading"
+                for s in self._remote_skills:
+                    s.hash = "loading"
+                self._panels.local_panel.display_skills(self._local_skills)
+                self._panels.remote_panel.display_skills(self._remote_skills)
+            self._auto_compare()
+        else:
+            # Stop any in-flight comparator and clear hash status.
+            self._finalize_worker("_compare_worker")
+            for s in self._local_skills:
+                s.hash = "off"
+            for s in self._remote_skills:
+                s.hash = "off"
+            self._panels.local_panel.display_skills(self._local_skills)
+            self._panels.remote_panel.display_skills(self._remote_skills)
+            self._set_status_chip("done", "校验已关闭")
+            self.statusBar().showMessage("内容一致性校验已关闭")
 
     def closeEvent(self, event):
         logger.info("Application shutting down")

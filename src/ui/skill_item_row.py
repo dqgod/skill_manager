@@ -88,6 +88,8 @@ class SkillItemRow(QFrame):
             "local-only": ("#f9e2af", "仅本机"),
             "remote-only": ("#fab387", "仅远程"),
             "conflict": ("#f38ba8", "内容不同"),
+            "loading": ("#89dceb", "检测中"),
+            "off": ("#6c7086", "未校验"),
         }
         if status in colors:
             color, text = colors[status]
