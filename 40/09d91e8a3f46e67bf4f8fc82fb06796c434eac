@@ -1,0 +1,87 @@
+src/ui/main_window.py
+  ba88b46dab1402fb 300-325,338,345,347,349 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0ef3ca383cb810009defb9","tool_type":"agent","tool_id":"SearchReplace","line_ranges":[{"Range":[300,325]},{"Single":338},{"Single":345},{"Single":347},{"Single":349}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "4009d91e8a3f46e67bf4f8fc82fb06796c434eac",
+  "prompts": {
+    "ba88b46dab1402fb": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0d54ce383cb810009deaec",
+        "model": "openrouter-2o__dev"
+      },
+      "human_author": "dangqi.dq <dangqi.dq@bytedance.com>",
+      "messages": [],
+      "total_additions": 30,
+      "total_deletions": 23,
+      "accepted_lines": 30,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {
+    "src/ui/main_window.py": [
+      {
+        "hash": "ba88b46dab1402fb",
+        "line_ranges": [
+          {
+            "Range": [
+              300,
+              325
+            ]
+          },
+          {
+            "Single": 338
+          },
+          {
+            "Single": 345
+          },
+          {
+            "Single": 347
+          },
+          {
+            "Single": 349
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0ef3ca383cb810009defb9",
+            "tool_type": "agent",
+            "tool_id": "SearchReplace",
+            "line_ranges": [
+              {
+                "Range": [
+                  300,
+                  325
+                ]
+              },
+              {
+                "Single": 338
+              },
+              {
+                "Single": 345
+              },
+              {
+                "Single": 347
+              },
+              {
+                "Single": 349
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "ba88b46dab1402fb": {
+      "tool": "trae",
+      "conversation_id": "6a0d54ce383cb810009deaec",
+      "session_id": "6a0d54ce383cb810009deaec",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
