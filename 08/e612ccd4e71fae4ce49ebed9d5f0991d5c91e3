@@ -1,0 +1,142 @@
+src/services/ssh_manager.py
+  ba88b46dab1402fb 227-273 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0efed3383cb810009df0f4","tool_type":"agent","tool_id":"SearchReplace","line_ranges":[{"Range":[227,273]}]}]}
+src/services/skill_scanner.py
+  ba88b46dab1402fb 134-143,151-183,193,226-232,235-271,273 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0efed3383cb810009df0f4","tool_type":"agent","tool_id":"SearchReplace","line_ranges":[{"Range":[134,143]},{"Range":[151,183]},{"Single":193},{"Range":[226,232]},{"Range":[235,271]},{"Single":273}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "08e612ccd4e71fae4ce49ebed9d5f0991d5c91e3",
+  "prompts": {
+    "ba88b46dab1402fb": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0d54ce383cb810009deaec",
+        "model": "openrouter-2o__dev"
+      },
+      "human_author": "dangqi.dq <dangqi.dq@bytedance.com>",
+      "messages": [],
+      "total_additions": 136,
+      "total_deletions": 7,
+      "accepted_lines": 136,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {
+    "src/services/skill_scanner.py": [
+      {
+        "hash": "ba88b46dab1402fb",
+        "line_ranges": [
+          {
+            "Range": [
+              134,
+              143
+            ]
+          },
+          {
+            "Range": [
+              151,
+              183
+            ]
+          },
+          {
+            "Single": 193
+          },
+          {
+            "Range": [
+              226,
+              232
+            ]
+          },
+          {
+            "Range": [
+              235,
+              271
+            ]
+          },
+          {
+            "Single": 273
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0efed3383cb810009df0f4",
+            "tool_type": "agent",
+            "tool_id": "SearchReplace",
+            "line_ranges": [
+              {
+                "Range": [
+                  134,
+                  143
+                ]
+              },
+              {
+                "Range": [
+                  151,
+                  183
+                ]
+              },
+              {
+                "Single": 193
+              },
+              {
+                "Range": [
+                  226,
+                  232
+                ]
+              },
+              {
+                "Range": [
+                  235,
+                  271
+                ]
+              },
+              {
+                "Single": 273
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "src/services/ssh_manager.py": [
+      {
+        "hash": "ba88b46dab1402fb",
+        "line_ranges": [
+          {
+            "Range": [
+              227,
+              273
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0efed3383cb810009df0f4",
+            "tool_type": "agent",
+            "tool_id": "SearchReplace",
+            "line_ranges": [
+              {
+                "Range": [
+                  227,
+                  273
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "ba88b46dab1402fb": {
+      "tool": "trae",
+      "conversation_id": "6a0d54ce383cb810009deaec",
+      "session_id": "6a0d54ce383cb810009deaec",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
