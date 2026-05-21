@@ -1,0 +1,354 @@
+src/ui/skill_item_row.py
+  ba88b46dab1402fb 91-92 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0ef2ff383cb810009def9a","tool_type":"agent","tool_id":"SearchReplace","line_ranges":[{"Range":[91,92]}]}]}
+src/ui/main_window.py
+  ba88b46dab1402fb 5,8,249-262,300-329,582,611,644,685-690,693,699-709,720-724,727,733-742,751-760,764,787,801,867-931 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0ef2ff383cb810009def9a","tool_type":"agent","tool_id":"SearchReplace","line_ranges":[{"Single":5},{"Single":8},{"Range":[249,262]},{"Range":[300,329]},{"Single":582},{"Single":611},{"Single":644},{"Range":[685,690]},{"Single":693},{"Range":[699,709]},{"Range":[720,724]},{"Single":727},{"Range":[733,742]},{"Range":[751,760]},{"Single":764},{"Single":787},{"Single":801},{"Range":[867,931]}]}]}
+tests/test_main_window.py
+  ba88b46dab1402fb 4,8,75-155 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0ef2ff383cb810009def9a","tool_type":"agent","tool_id":"SearchReplace","line_ranges":[{"Single":4},{"Single":8},{"Range":[75,155]}]}]}
+src/ui/skill_list_widget.py
+  ba88b46dab1402fb 3-5,7,34-41,84-86,93-164 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0ef2ff383cb810009def9a","tool_type":"agent","tool_id":"SearchReplace","line_ranges":[{"Range":[3,5]},{"Single":7},{"Range":[34,41]},{"Range":[84,86]},{"Range":[93,164]}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "81a55a8cdc941f93825092ecf9a88ccedac18b17",
+  "prompts": {
+    "ba88b46dab1402fb": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0d54ce383cb810009deaec",
+        "model": "openrouter-2o__dev"
+      },
+      "human_author": "dangqi.dq <dangqi.dq@bytedance.com>",
+      "messages": [],
+      "total_additions": 333,
+      "total_deletions": 25,
+      "accepted_lines": 333,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {
+    "src/ui/main_window.py": [
+      {
+        "hash": "ba88b46dab1402fb",
+        "line_ranges": [
+          {
+            "Single": 5
+          },
+          {
+            "Single": 8
+          },
+          {
+            "Range": [
+              249,
+              262
+            ]
+          },
+          {
+            "Range": [
+              300,
+              329
+            ]
+          },
+          {
+            "Single": 582
+          },
+          {
+            "Single": 611
+          },
+          {
+            "Single": 644
+          },
+          {
+            "Range": [
+              685,
+              690
+            ]
+          },
+          {
+            "Single": 693
+          },
+          {
+            "Range": [
+              699,
+              709
+            ]
+          },
+          {
+            "Range": [
+              720,
+              724
+            ]
+          },
+          {
+            "Single": 727
+          },
+          {
+            "Range": [
+              733,
+              742
+            ]
+          },
+          {
+            "Range": [
+              751,
+              760
+            ]
+          },
+          {
+            "Single": 764
+          },
+          {
+            "Single": 787
+          },
+          {
+            "Single": 801
+          },
+          {
+            "Range": [
+              867,
+              931
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0ef2ff383cb810009def9a",
+            "tool_type": "agent",
+            "tool_id": "SearchReplace",
+            "line_ranges": [
+              {
+                "Single": 5
+              },
+              {
+                "Single": 8
+              },
+              {
+                "Range": [
+                  249,
+                  262
+                ]
+              },
+              {
+                "Range": [
+                  300,
+                  329
+                ]
+              },
+              {
+                "Single": 582
+              },
+              {
+                "Single": 611
+              },
+              {
+                "Single": 644
+              },
+              {
+                "Range": [
+                  685,
+                  690
+                ]
+              },
+              {
+                "Single": 693
+              },
+              {
+                "Range": [
+                  699,
+                  709
+                ]
+              },
+              {
+                "Range": [
+                  720,
+                  724
+                ]
+              },
+              {
+                "Single": 727
+              },
+              {
+                "Range": [
+                  733,
+                  742
+                ]
+              },
+              {
+                "Range": [
+                  751,
+                  760
+                ]
+              },
+              {
+                "Single": 764
+              },
+              {
+                "Single": 787
+              },
+              {
+                "Single": 801
+              },
+              {
+                "Range": [
+                  867,
+                  931
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "src/ui/skill_item_row.py": [
+      {
+        "hash": "ba88b46dab1402fb",
+        "line_ranges": [
+          {
+            "Range": [
+              91,
+              92
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0ef2ff383cb810009def9a",
+            "tool_type": "agent",
+            "tool_id": "SearchReplace",
+            "line_ranges": [
+              {
+                "Range": [
+                  91,
+                  92
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "src/ui/skill_list_widget.py": [
+      {
+        "hash": "ba88b46dab1402fb",
+        "line_ranges": [
+          {
+            "Range": [
+              3,
+              5
+            ]
+          },
+          {
+            "Single": 7
+          },
+          {
+            "Range": [
+              34,
+              41
+            ]
+          },
+          {
+            "Range": [
+              84,
+              86
+            ]
+          },
+          {
+            "Range": [
+              93,
+              164
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0ef2ff383cb810009def9a",
+            "tool_type": "agent",
+            "tool_id": "SearchReplace",
+            "line_ranges": [
+              {
+                "Range": [
+                  3,
+                  5
+                ]
+              },
+              {
+                "Single": 7
+              },
+              {
+                "Range": [
+                  34,
+                  41
+                ]
+              },
+              {
+                "Range": [
+                  84,
+                  86
+                ]
+              },
+              {
+                "Range": [
+                  93,
+                  164
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "tests/test_main_window.py": [
+      {
+        "hash": "ba88b46dab1402fb",
+        "line_ranges": [
+          {
+            "Single": 4
+          },
+          {
+            "Single": 8
+          },
+          {
+            "Range": [
+              75,
+              155
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0ef2ff383cb810009def9a",
+            "tool_type": "agent",
+            "tool_id": "SearchReplace",
+            "line_ranges": [
+              {
+                "Single": 4
+              },
+              {
+                "Single": 8
+              },
+              {
+                "Range": [
+                  75,
+                  155
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "ba88b46dab1402fb": {
+      "tool": "trae",
+      "conversation_id": "6a0d54ce383cb810009deaec",
+      "session_id": "6a0d54ce383cb810009deaec",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
