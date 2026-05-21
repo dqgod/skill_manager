@@ -297,36 +297,6 @@ class MainWindow(QMainWindow):
         hist_action = hist_menu.addAction("查看历史...")
         hist_action.triggered.connect(self._open_history_dialog)
 
-        # ----- top-right corner widget: hash-compare toggle + status chip -----
-        corner = QWidget()
-        corner_layout = QHBoxLayout(corner)
-        corner_layout.setContentsMargins(0, 0, 12, 0)
-        corner_layout.setSpacing(10)
-
-        self._hash_compare_check = QCheckBox("校验内容一致性")
-        self._hash_compare_check.setStyleSheet(
-            "QCheckBox { color: #a6adc8; font-size: 11px; spacing: 4px; }"
-            "QCheckBox::indicator { width: 13px; height: 13px; }"
-        )
-        self._hash_compare_check.setToolTip(
-            "打开后会计算并比较本机与远端 skill 的内容哈希；\n"
-            "关闭则跳过哈希计算，只展示列表，启动/刷新更快。"
-        )
-        self._hash_compare_check.setChecked(self._hash_compare_enabled)
-        self._hash_compare_check.toggled.connect(self._on_hash_compare_toggled)
-        corner_layout.addWidget(self._hash_compare_check)
-
-        self._status_chip = QLabel("")
-        self._status_chip.setStyleSheet(
-            "QLabel { font-size: 11px; padding: 2px 8px; border-radius: 8px;"
-            "color: #6c7086; background: transparent; }"
-        )
-        corner_layout.addWidget(self._status_chip)
-
-        menubar.setCornerWidget(corner, Qt.TopRightCorner)
-        self._set_status_chip("idle")
-        # ---------------------------------------------------------------------
-
         # main content
         content = QHBoxLayout()
         content.setContentsMargins(0, 0, 0, 0)
@@ -340,6 +310,43 @@ class MainWindow(QMainWindow):
         right = QVBoxLayout()
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(0)
+
+        # ----- top bar above panels: hash-compare toggle + status chip -----
+        # Lives inside the main window (not the menubar) because macOS
+        # QMenuBar.setCornerWidget interacts poorly with the native menu
+        # and ends up deleting the corner widget at runtime.
+        top_bar = QWidget()
+        top_bar.setStyleSheet(
+            "QWidget { background: #1e1e2e; border-bottom: 1px solid #3a3a55; }"
+        )
+        top_bar_layout = QHBoxLayout(top_bar)
+        top_bar_layout.setContentsMargins(12, 6, 12, 6)
+        top_bar_layout.setSpacing(10)
+        top_bar_layout.addStretch()
+
+        self._hash_compare_check = QCheckBox("校验内容一致性")
+        self._hash_compare_check.setStyleSheet(
+            "QCheckBox { color: #a6adc8; font-size: 11px; spacing: 4px; }"
+            "QCheckBox::indicator { width: 13px; height: 13px; }"
+        )
+        self._hash_compare_check.setToolTip(
+            "打开后会计算并比较本机与远端 skill 的内容哈希；\n"
+            "关闭则跳过哈希计算，只展示列表，启动/刷新更快。"
+        )
+        self._hash_compare_check.setChecked(self._hash_compare_enabled)
+        self._hash_compare_check.toggled.connect(self._on_hash_compare_toggled)
+        top_bar_layout.addWidget(self._hash_compare_check)
+
+        self._status_chip = QLabel("")
+        self._status_chip.setStyleSheet(
+            "QLabel { font-size: 11px; padding: 2px 8px; border-radius: 8px;"
+            "color: #6c7086; background: transparent; }"
+        )
+        top_bar_layout.addWidget(self._status_chip)
+
+        right.addWidget(top_bar)
+        self._set_status_chip("idle")
+        # -------------------------------------------------------------------
 
         self._panels = SkillPanels()
         local = self._panels.local_panel
