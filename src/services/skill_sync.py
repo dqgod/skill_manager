@@ -412,10 +412,17 @@ class SkillSyncService:
 
     @staticmethod
     def _archive_local_dir(path: str) -> bytes:
+        """Tar.gz a local directory, applying the same SKILL_IGNORE_* filters
+        as the hashers so two sides agree on byte content after sync."""
+        from src.services.skill_hasher import should_ignore_file
         buffer = io.BytesIO()
         root = Path(path)
         with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
             for entry in sorted(root.rglob("*")):
+                if entry.is_file():
+                    rel = entry.relative_to(root).as_posix()
+                    if should_ignore_file(rel):
+                        continue
                 tar.add(entry, arcname=entry.relative_to(root))
         return buffer.getvalue()
 

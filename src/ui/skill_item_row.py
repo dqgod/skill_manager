@@ -1,7 +1,13 @@
 """单个 skill 行组件"""
 
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QMenu, QApplication
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QAction, QGuiApplication
+
+from src.utils.fs import reveal_in_file_manager
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class SkillItemRow(QFrame):
@@ -12,6 +18,9 @@ class SkillItemRow(QFrame):
         self.skill_info = skill_info
         self._selected = False
         self._setup_ui()
+        # Right-click context menu (PR-4).
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._open_context_menu)
 
     def _setup_ui(self):
         self.setFixedHeight(44)
@@ -51,6 +60,9 @@ class SkillItemRow(QFrame):
         name_label = QLabel(self.skill_info.name)
         name_label.setStyleSheet("font-size: 12px; font-weight: 500; color: #cdd6f4;")
         name_label.setMaximumHeight(18)
+        name_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+        )
         info_layout.addWidget(name_label)
 
         meta_label = QLabel(
@@ -58,6 +70,9 @@ class SkillItemRow(QFrame):
         )
         meta_label.setStyleSheet("font-size: 10px; color: #6c7086;")
         meta_label.setMaximumHeight(14)
+        meta_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+        )
         info_layout.addWidget(meta_label)
 
         layout.addLayout(info_layout, stretch=1)
@@ -111,7 +126,10 @@ class SkillItemRow(QFrame):
         self.style().polish(self)
 
     def mouseReleaseEvent(self, event):
-        self.clicked.emit()
+        # Only treat left-click as a selection toggle; right-click should
+        # purely open the context menu without flipping selection.
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
         super().mouseReleaseEvent(event)
 
     @staticmethod
@@ -122,3 +140,44 @@ class SkillItemRow(QFrame):
             return f"{size / 1024:.0f}KB"
         else:
             return f"{size / (1024 * 1024):.1f}MB"
+
+    # ---- Context menu (PR-4) ----
+
+    def _open_context_menu(self, pos):
+        """Build and pop up the per-row context menu.
+
+        Local skills get an extra "Reveal in file manager" entry; remote
+        skills only get the copy-* actions because we cannot open a remote
+        path locally.
+        """
+        menu = QMenu(self)
+        is_local = getattr(self.skill_info, "device_type", "local") == "local"
+
+        if is_local:
+            act_open = QAction("在文件管理器中显示", self)
+            act_open.triggered.connect(self._reveal_in_finder)
+            menu.addAction(act_open)
+            menu.addSeparator()
+
+        act_copy_path = QAction(
+            "复制路径" if is_local else "复制远端路径", self,
+        )
+        act_copy_path.triggered.connect(self._copy_path)
+        menu.addAction(act_copy_path)
+
+        act_copy_name = QAction("复制名称", self)
+        act_copy_name.triggered.connect(self._copy_name)
+        menu.addAction(act_copy_name)
+
+        menu.exec(self.mapToGlobal(pos))
+
+    def _reveal_in_finder(self):
+        ok = reveal_in_file_manager(self.skill_info.path)
+        if not ok:
+            logger.info("reveal failed for %s", self.skill_info.path)
+
+    def _copy_path(self):
+        QGuiApplication.clipboard().setText(self.skill_info.path)
+
+    def _copy_name(self):
+        QGuiApplication.clipboard().setText(self.skill_info.name)

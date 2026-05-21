@@ -131,16 +131,22 @@ class SSHManager:
             return []
 
     def compute_remote_hash(self, conn: Connection, remote_path: str) -> str:
-        """Compute deterministic SHA-256 hash of a remote file or directory."""
+        """Compute deterministic SHA-256 hash of a remote file or directory.
+
+        For directories, must mirror SkillHasher._hash_directory:
+          - LC_ALL=C sort (raw byte order)
+          - skip files matching SKILL_IGNORE_* sets
+        """
         try:
             quoted = shlex.quote(remote_path)
+            find_filters = self._build_find_filters()
             cmd = (
                 f"if [ -f {quoted} ]; then "
                 f"sha256sum {quoted} | cut -d' ' -f1; "
                 f"elif [ -d {quoted} ]; then "
                 f"cd {quoted} && "
-                f"if find . -type f -print -quit | grep -q .; then "
-                f"find . -type f -print0 | sort -z | "
+                f"if find . -type f {find_filters} -print -quit | grep -q .; then "
+                f"LC_ALL=C find . -type f {find_filters} -print0 | LC_ALL=C sort -z | "
                 f"xargs -0 sha256sum | sha256sum | cut -d' ' -f1; "
                 f"else printf '{EMPTY_SHA256}'; fi; "
                 f"else printf ''; fi"
@@ -150,6 +156,138 @@ class SSHManager:
         except Exception as e:
             logger.warning(f"compute_remote_hash failed for {remote_path}: {e}")
             return ""
+
+    @staticmethod
+    def _build_find_filters() -> str:
+        """Return `find` predicates that exclude SKILL_IGNORE_* entries.
+
+        Shape:  ! -name '.DS_Store' ! -name '*.swp' ... ! -path '*/.git/*' ...
+        """
+        from src.config import (
+            SKILL_IGNORE_DIRS,
+            SKILL_IGNORE_FILE_GLOBS,
+            SKILL_IGNORE_FILES,
+        )
+        parts: list[str] = []
+        for name in sorted(SKILL_IGNORE_FILES):
+            parts.append(f"! -name {shlex.quote(name)}")
+        for pat in SKILL_IGNORE_FILE_GLOBS:
+            parts.append(f"! -name {shlex.quote(pat)}")
+        for d in sorted(SKILL_IGNORE_DIRS):
+            parts.append(f"! -path {shlex.quote(f'*/{d}/*')}")
+        return " ".join(parts)
+
+    def compute_remote_hashes(self, conn: Connection,
+                              remote_paths: list[str]) -> dict[str, str]:
+        """Hash many remote paths in a single SSH round-trip.
+
+        Returns {remote_path: sha256_hex_or_empty}. A failed entry maps to "".
+
+        Why batched: previous behaviour issued N SSH `exec_command`s for N
+        skills; on internal links that's ~80ms × N. One round-trip drops total
+        cost to ~one round-trip.
+        """
+        if not remote_paths:
+            return {}
+        find_filters = self._build_find_filters()
+        # Ship the list of paths through base64 so spaces / unicode survive.
+        import base64
+        encoded = base64.b64encode(
+            "\n".join(remote_paths).encode("utf-8")
+        ).decode("ascii")
+        empty_hash = EMPTY_SHA256
+        cmd = (
+            f"echo {shlex.quote(encoded)} | base64 -d | "
+            f"while IFS= read -r p; do "
+            f"  if [ -f \"$p\" ]; then "
+            f"    h=$(sha256sum \"$p\" | cut -d' ' -f1); "
+            f"  elif [ -d \"$p\" ]; then "
+            f"    if (cd \"$p\" && find . -type f {find_filters} -print -quit | grep -q .); then "
+            f"      h=$(cd \"$p\" && LC_ALL=C find . -type f {find_filters} -print0 | "
+            f"          LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1); "
+            f"    else h={empty_hash}; fi; "
+            f"  else h=''; fi; "
+            f"  printf '%s\\t%s\\n' \"$h\" \"$p\"; "
+            f"done"
+        )
+        results: dict[str, str] = {p: "" for p in remote_paths}
+        try:
+            output = self._run_command(conn, cmd, timeout=120)
+        except Exception as e:
+            logger.warning("compute_remote_hashes batch failed: %s", e)
+            return results
+        for line in output.splitlines():
+            if "\t" not in line:
+                continue
+            h, p = line.split("\t", 1)
+            if p in results:
+                results[p] = h.strip()
+        return results
+
+    def scan_skills_global(self, conn: Connection, remote_home: str,
+                           tools: list[str]) -> dict[str, list[dict]]:
+        """List all skill directories for the given tools in a single SSH call.
+
+        Returns {tool: [{name, path, mtime, size}, ...]}.
+
+        Why: replaces N×listdir+per-skill SKILL.md stat with one `find`.
+        """
+        bases = []
+        tool_to_base = {}
+        for t in tools:
+            base = f"{remote_home}/.{t}/skills"
+            bases.append(base)
+            tool_to_base[t] = base
+        if not bases:
+            return {t: [] for t in tools}
+        # find each base dir's */SKILL.md, print "<base>|<skill_name>|<mtime>|<size>"
+        # using mtime of the skill *directory* (parent of SKILL.md).
+        quoted_bases = " ".join(shlex.quote(b) for b in bases)
+        cmd = (
+            f"for base in {quoted_bases}; do "
+            f"  if [ -d \"$base\" ]; then "
+            f"    for d in \"$base\"/*/; do "
+            f"      [ -d \"$d\" ] || continue; "
+            f"      [ -f \"$d/SKILL.md\" ] || continue; "
+            f"      name=$(basename \"$d\"); "
+            f"      mtime=$(stat -c %Y \"$d\" 2>/dev/null || stat -f %m \"$d\"); "
+            f"      size=$(stat -c %s \"$d\" 2>/dev/null || stat -f %z \"$d\"); "
+            f"      printf '%s|%s|%s|%s\\n' \"$base\" \"$name\" \"$mtime\" \"$size\"; "
+            f"    done; "
+            f"  fi; "
+            f"done"
+        )
+        out: dict[str, list[dict]] = {t: [] for t in tools}
+        try:
+            output = self._run_command(conn, cmd, timeout=30)
+        except Exception as e:
+            logger.warning("scan_skills_global batch failed: %s", e)
+            return out
+        # invert tool_to_base for parsing
+        base_to_tool = {v: k for k, v in tool_to_base.items()}
+        for line in output.splitlines():
+            parts = line.split("|", 3)
+            if len(parts) != 4:
+                continue
+            base, name, mtime, size = parts
+            tool = base_to_tool.get(base)
+            if tool is None:
+                continue
+            try:
+                mtime_f = float(mtime)
+            except ValueError:
+                mtime_f = 0.0
+            try:
+                size_i = int(size)
+            except ValueError:
+                size_i = 0
+            out[tool].append({
+                "name": name,
+                "path": f"{base}/{name}",
+                "mtime": mtime_f,
+                "size": size_i,
+            })
+        return out
 
     def file_exists(self, conn: Connection, remote_path: str) -> bool:
         client = self.get_client(conn)

@@ -1,7 +1,5 @@
 """主窗口：菜单栏 + 侧边栏 + 双面板 + 底部栏"""
 
-import copy
-
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QStatusBar,
 )
@@ -138,6 +136,84 @@ class _SyncWorker(QThread):
         self._apply_all = apply_all
 
 
+class _AutoCompareWorker(QThread):
+    """Run SkillHasher.compare off the UI thread.
+
+    Returns the *tagged* local + remote lists; emits failure as empty results.
+    """
+    finished = Signal(list, list)  # tagged_local, tagged_remote
+    failed = Signal(str)
+
+    def __init__(self, hasher: SkillHasher, local: list, remote: list,
+                 connection, parent=None):
+        super().__init__(parent)
+        self._hasher = hasher
+        self._local = local
+        self._remote = remote
+        self._connection = connection
+
+    def run(self):
+        try:
+            diff = self._hasher.compare(
+                self._local, self._remote,
+                remote_connection=self._connection,
+            )
+            synced = {(s.name, s.tool) for s in diff.synced}
+            local_only = {(s.name, s.tool) for s in diff.local_only}
+            remote_only = {(s.name, s.tool) for s in diff.remote_only}
+            conflict = {(p[0].name, p[0].tool) for p in diff.conflict}
+
+            for s in self._local:
+                key = (s.name, s.tool)
+                if key in synced:
+                    s.hash = "synced"
+                elif key in conflict:
+                    s.hash = "conflict"
+                elif key in local_only:
+                    s.hash = "local-only"
+                else:
+                    s.hash = "unknown"
+            for s in self._remote:
+                key = (s.name, s.tool)
+                if key in synced:
+                    s.hash = "synced"
+                elif key in conflict:
+                    s.hash = "conflict"
+                elif key in remote_only:
+                    s.hash = "remote-only"
+                else:
+                    s.hash = "unknown"
+            self.finished.emit(self._local, self._remote)
+        except Exception as e:
+            logger.warning("Auto-compare failed: %s", e)
+            self.failed.emit(str(e))
+
+
+class _HealthCheckWorker(QThread):
+    """Test reachability of a remote connection off the UI thread.
+
+    Emits status:
+      'online'  — TCP + auth OK (echo round-trip succeeded)
+      'offline' — any failure; detail carries the human-readable cause
+    """
+    finished = Signal(str, str)  # status, detail
+
+    def __init__(self, ssh: SSHManager, connection, parent=None):
+        super().__init__(parent)
+        self._ssh = ssh
+        self._connection = connection
+
+    def run(self):
+        try:
+            ok, msg = self._ssh.test(self._connection)
+            if ok:
+                self.finished.emit("online", "在线")
+            else:
+                self.finished.emit("offline", msg or "连接失败")
+        except Exception as e:
+            self.finished.emit("offline", str(e))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -154,6 +230,13 @@ class MainWindow(QMainWindow):
         self._idle_timer = QTimer(self)
         self._idle_timer.timeout.connect(self._ssh.cleanup_idle)
         self._idle_timer.start(60_000)  # every 60 seconds
+
+        # Periodic remote-connection health check (PR-3 status indicator).
+        # Refresh every 60s while a device is selected.
+        self._health_timer = QTimer(self)
+        self._health_timer.timeout.connect(self._check_remote_health)
+        self._health_timer.start(60_000)
+
         self._projects: list = []
         self._sync_conflict_strategy = "ask"
         self._local_skills: list = []
@@ -276,9 +359,11 @@ class MainWindow(QMainWindow):
     def _on_remote_device_changed(self, conn_name: str):
         if not conn_name:
             self._active_connection = None
+            self._panels.remote_panel.set_connection_status("unknown")
             return
         self._active_connection = ConnectionModel.get_by_name(conn_name)
         if self._active_connection:
+            self._check_remote_health()
             self._refresh_remote(self._sidebar.active_view)
 
     def _on_add_project(self):
@@ -432,6 +517,8 @@ class MainWindow(QMainWindow):
         if not self._active_connection and connections:
             remote_panel.select_device(connections[0].name)
             self._active_connection = connections[0]
+            # Probe health right away so user sees green/red within seconds.
+            self._check_remote_health()
 
     def _refresh_local(self, view_id: str):
         # Disconnect and stop any previous worker
@@ -510,6 +597,13 @@ class MainWindow(QMainWindow):
         self._panels.remote_panel.display_skills([])
         self._update_badges("remote", [])
         self.statusBar().showMessage(f"远程扫描失败：{msg}")
+        # Mark the panel offline with the actual error reason.
+        if self._active_connection:
+            conn = self._active_connection
+            self._panels.remote_panel.set_connection_status(
+                "offline",
+                f"无法连接 {conn.username}@{conn.host}:{conn.port}\n{msg}",
+            )
         try:
             toast = Toast(self)
             toast.show_message(msg, duration=4000, success=False)
@@ -550,6 +644,9 @@ class MainWindow(QMainWindow):
             # No remote data yet — mark all as local-only
             for s in self._local_skills:
                 s.hash = "local-only"
+            self._panels.local_panel.display_skills(self._local_skills)
+        # Always render local list immediately so the UI doesn't look frozen;
+        # _auto_compare may re-render later with status tags.
         self._panels.local_panel.display_skills(self._local_skills)
         self.statusBar().showMessage(f"本机扫描完成，{len(skills)} 个 skill")
         self._on_selection_changed()
@@ -559,6 +656,13 @@ class MainWindow(QMainWindow):
         self.setCursor(Qt.ArrowCursor)
         self._remote_skills = skills
         self._update_badges("remote", skills)
+        # A successful scan implies the remote is reachable.
+        if self._active_connection:
+            conn = self._active_connection
+            self._panels.remote_panel.set_connection_status(
+                "online",
+                f"已连接 {conn.username}@{conn.host}:{conn.port}",
+            )
         if self._local_skills:
             self._auto_compare()
         else:
@@ -570,19 +674,93 @@ class MainWindow(QMainWindow):
         logger.info("Remote scan completed: %d skills", len(skills))
 
     def _auto_compare(self):
-        """Auto-compare local and remote skills, apply status tags."""
-        # Preserve original local skills before classify_skills mutates their
-        # hash fields (Bug 4). classify_remote_skills needs unmodified hashes.
-        original_local = copy.deepcopy(self._local_skills)
+        """Auto-compare local and remote skills off the UI thread.
 
-        self._local_skills = self._hasher.classify_skills(
-            self._local_skills, self._remote_skills,
-            remote_connection=self._active_connection,
+        Why: the comparator must hash every shared skill on the *remote* side,
+        which historically blocked the GUI for several seconds on large
+        inventories. Pushing it into a worker keeps the window responsive
+        and lets users keep scrolling/clicking while we crunch.
+        """
+        # Cancel any in-flight comparison
+        self._finalize_worker("_compare_worker")
+        self.statusBar().showMessage("正在比对本机/远程 skill ...")
+        self._compare_worker = _AutoCompareWorker(
+            self._hasher,
+            self._local_skills,
+            self._remote_skills,
+            self._active_connection,
+            parent=self,
         )
-        self._remote_skills = self._hasher.classify_remote_skills(
-            original_local, self._remote_skills,
-            remote_connection=self._active_connection,
+        self._compare_worker.finished.connect(self._on_compare_done)
+        self._compare_worker.failed.connect(self._on_compare_failed)
+        self._compare_worker.start()
+
+    def _on_compare_done(self, tagged_local: list, tagged_remote: list):
+        self._finalize_worker("_compare_worker")
+        self._local_skills = tagged_local
+        self._remote_skills = tagged_remote
+        self._panels.local_panel.display_skills(self._local_skills)
+        self._panels.remote_panel.display_skills(self._remote_skills)
+        synced = sum(1 for s in self._local_skills if s.hash == "synced")
+        self.statusBar().showMessage(
+            f"比对完成：{synced} 已同步 / {len(self._local_skills)} 本机 / "
+            f"{len(self._remote_skills)} 远程"
         )
+
+    def _on_compare_failed(self, msg: str):
+        self._finalize_worker("_compare_worker")
+        # Fall back to direction-only tagging so user still sees the lists
+        local_keys = {(s.name, s.tool) for s in self._local_skills}
+        remote_keys = {(s.name, s.tool) for s in self._remote_skills}
+        for s in self._local_skills:
+            s.hash = "synced" if (s.name, s.tool) in remote_keys else "local-only"
+        for s in self._remote_skills:
+            s.hash = "synced" if (s.name, s.tool) in local_keys else "remote-only"
+        self._panels.local_panel.display_skills(self._local_skills)
+        self._panels.remote_panel.display_skills(self._remote_skills)
+        self.statusBar().showMessage(f"比对失败：{msg}")
+        try:
+            self._toast.show_message(f"比对失败：{msg}", success=False, duration=3000)
+        except Exception:
+            pass
+
+    # ---- Connection health check (PR-3) ----
+
+    def _check_remote_health(self):
+        """Run an SSH health probe for the current active connection.
+
+        Result is rendered as the colored status dot in the remote panel.
+        Safe to call repeatedly: in-flight worker is replaced.
+        """
+        if not self._active_connection:
+            self._panels.remote_panel.set_connection_status("unknown")
+            return
+        # Replace any in-flight worker
+        self._finalize_worker("_health_worker")
+        # Yellow "checking" while we probe
+        host = self._active_connection.host
+        self._panels.remote_panel.set_connection_status(
+            "checking", f"正在检测 {host} ..."
+        )
+        self._health_worker = _HealthCheckWorker(
+            self._ssh, self._active_connection, parent=self,
+        )
+        self._health_worker.finished.connect(self._on_health_done)
+        self._health_worker.start()
+
+    def _on_health_done(self, status: str, detail: str):
+        self._finalize_worker("_health_worker")
+        if not self._active_connection:
+            return
+        conn = self._active_connection
+        if status == "online":
+            tip = f"已连接 {conn.username}@{conn.host}:{conn.port}"
+        else:
+            tip = f"无法连接 {conn.username}@{conn.host}:{conn.port}\n{detail}"
+        self._panels.remote_panel.set_connection_status(status, tip)
+        # If a refresh was queued while we were unknown, kick it now.
+        if status == "online" and not self._remote_skills:
+            self._refresh_remote(self._sidebar.active_view)
 
     def _tag_to_status(self, skill_info) -> str:
         """Map skill_info hash field to a display status tag."""

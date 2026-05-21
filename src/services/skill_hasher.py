@@ -1,16 +1,43 @@
 """Skill 哈希计算与对比去重 (F3)"""
 
+import fnmatch
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
+from src.config import (
+    SKILL_IGNORE_DIRS,
+    SKILL_IGNORE_FILE_GLOBS,
+    SKILL_IGNORE_FILES,
+)
 from src.models.connection import Connection
 from src.services.skill_scanner import SkillInfo
 from src.services.ssh_manager import SSHManager
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def should_ignore_file(rel_path: str) -> bool:
+    """Return True if the relative path should be excluded from hash/archive.
+
+    rel_path uses POSIX separators ('/').
+    """
+    # any path component is an ignored directory?
+    parts = [p for p in rel_path.split("/") if p]
+    if not parts:
+        return True
+    for part in parts[:-1]:
+        if part in SKILL_IGNORE_DIRS:
+            return True
+    name = parts[-1]
+    if name in SKILL_IGNORE_FILES:
+        return True
+    for pat in SKILL_IGNORE_FILE_GLOBS:
+        if fnmatch.fnmatch(name, pat):
+            return True
+    return False
 
 
 @dataclass
@@ -32,6 +59,12 @@ class DiffResult:
 class SkillHasher:
     """Compute SHA-256 hashes and compare skill sets."""
 
+    # Process-wide local hash cache: { (abs_path, mtime_ns_aggregate, size_total) -> sha }
+    # We use the directory's recursive (mtime, size) tuple as the cache key —
+    # if anything inside changed, the tuple changes and we recompute.
+    _local_cache: dict[tuple, str] = {}
+    _CACHE_LIMIT = 4096
+
     def __init__(self, ssh_manager: Optional[SSHManager] = None):
         self._ssh = ssh_manager
 
@@ -40,13 +73,73 @@ class SkillHasher:
     @staticmethod
     def compute_local_hash(fs_path: str) -> str:
         """SHA-256 of file or directory. Directory hash is deterministic
-        across machines: sorted concatenation of all file hashes."""
+        across machines: sorted concatenation of all file hashes.
+
+        Repeated calls with an unchanged tree are O(stat) thanks to a small
+        in-memory (mtime, size) cache.
+        """
         p = Path(fs_path)
         if not p.exists():
             return ""
         if p.is_file():
-            return SkillHasher._hash_file(p)
-        return SkillHasher._hash_directory(p)
+            try:
+                st = p.stat()
+                key = (str(p.resolve()), st.st_mtime_ns, st.st_size)
+            except OSError:
+                key = None
+            if key and key in SkillHasher._local_cache:
+                return SkillHasher._local_cache[key]
+            h = SkillHasher._hash_file(p)
+            if key:
+                SkillHasher._cache_put(key, h)
+            return h
+        # Directory: build a fingerprint from (rel_path, mtime_ns, size) tuples
+        # of all eligible files.
+        try:
+            sig = SkillHasher._dir_signature(p)
+        except OSError:
+            sig = None
+        if sig and sig in SkillHasher._local_cache:
+            return SkillHasher._local_cache[sig]
+        h = SkillHasher._hash_directory(p)
+        if sig:
+            SkillHasher._cache_put(sig, h)
+        return h
+
+    @staticmethod
+    def _cache_put(key: tuple, value: str) -> None:
+        # Naive bounded cache: drop an arbitrary entry once full.
+        if len(SkillHasher._local_cache) >= SkillHasher._CACHE_LIMIT:
+            try:
+                SkillHasher._local_cache.pop(next(iter(SkillHasher._local_cache)))
+            except StopIteration:
+                pass
+        SkillHasher._local_cache[key] = value
+
+    @staticmethod
+    def _dir_signature(path: Path) -> tuple:
+        """Return a hashable fingerprint of a directory's tree.
+
+        Cheap (`stat` only) yet specific enough to use as a cache key.
+        """
+        rel_entries: list[tuple] = []
+        for f in path.rglob("*"):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(path).as_posix()
+            if should_ignore_file(rel):
+                continue
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            rel_entries.append((rel, st.st_mtime_ns, st.st_size))
+        rel_entries.sort()
+        return ("dir", str(path.resolve()), tuple(rel_entries))
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        cls._local_cache.clear()
 
     def compute_remote_hash(self, conn, remote_path: str) -> str:
         """Compute hash on remote machine via SSH."""
@@ -77,22 +170,61 @@ class SkillHasher:
 
         all_keys = set(local_by_key.keys()) | set(remote_by_key.keys())
 
+        # ---- Bulk-hash phase ----------------------------------------------
+        # Pre-hash all skills that need hashing in one shot, both locally
+        # (cached on disk anyway) and on the remote (one SSH round-trip
+        # instead of N) — same result as the old per-skill loop, much faster.
+        intersect_keys = [k for k in all_keys
+                          if k in local_by_key and k in remote_by_key]
+
+        # local: just compute (SkillHasher caches nothing yet, but I/O is fast)
+        for k in intersect_keys:
+            l = local_by_key[k]
+            if l.hash is None or len(l.hash) != 64:
+                l.hash = self.compute_local_hash(l.path)
+
+        # remote: batch
+        if intersect_keys and remote_connection and self._ssh:
+            need_remote: list[str] = []
+            for k in intersect_keys:
+                r = remote_by_key[k]
+                if r.device_type == "remote" and (r.hash is None or len(r.hash) != 64):
+                    need_remote.append(r.path)
+            if need_remote:
+                try:
+                    bulk = self._ssh.compute_remote_hashes(
+                        remote_connection, need_remote,
+                    )
+                except Exception as e:
+                    logger.warning("bulk remote hash failed, falling back: %s", e)
+                    bulk = {}
+                for k in intersect_keys:
+                    r = remote_by_key[k]
+                    if r.device_type == "remote" and (r.hash is None or len(r.hash) != 64):
+                        h = bulk.get(r.path, "")
+                        # fallback: per-skill if bulk missed
+                        if not h:
+                            h = self._ssh.compute_remote_hash(
+                                remote_connection, r.path,
+                            )
+                        r.hash = h
+
+        # ---- Classification ----------------------------------------------
         for key in sorted(all_keys):
             l = local_by_key.get(key)
             r = remote_by_key.get(key)
 
             if l and r:
-                # both exist — compute hashes if not already done
-                if l.hash is None:
+                # ensure hashes are populated (fallback path)
+                if l.hash is None or len(l.hash) != 64:
                     l.hash = self.compute_local_hash(l.path)
-                if r.hash is None:
+                if r.hash is None or len(r.hash) != 64:
                     if r.device_type == "remote" and self._ssh:
                         r.hash = self.compute_remote_hash(remote_connection, r.path)
                     else:
-                        # this is a local skill stored in remote list (unlikely)
                         r.hash = self.compute_local_hash(r.path)
 
-                if l.hash == r.hash:
+                if l.hash and l.hash == r.hash:
                     result.synced.append(l)
                 else:
                     result.conflict.append((l, r))
@@ -178,12 +310,34 @@ class SkillHasher:
 
     @staticmethod
     def _hash_directory(path: Path) -> str:
-        """Deterministic directory hash based on relative paths and file hashes."""
-        files = sorted(f for f in path.rglob("*") if f.is_file())
+        """Deterministic directory hash based on relative paths and file hashes.
+
+        Mirrors the remote command:
+          (cd <dir> && find . -type f ... | sort -z |
+           xargs -0 sha256sum | sha256sum)
+
+        We must:
+          - skip noise files (.DS_Store, *.swp, __pycache__, .git ...) so the
+            two sides don't disagree just because one carries OS/editor litter;
+          - sort by raw bytes (LC_ALL=C) so non-ASCII filenames produce the
+            same order on macOS, Linux, and the remote shell;
+          - emit "<hex>  ./<rel>\n" exactly like sha256sum does, including
+            the leading "./" prefix that `find .` adds.
+        """
+        files: list[Path] = []
+        for f in path.rglob("*"):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(path).as_posix()
+            if should_ignore_file(rel):
+                continue
+            files.append(f)
         if not files:
             return hashlib.sha256(b"").hexdigest()
+        # raw-bytes sort = LC_ALL=C sort
+        files.sort(key=lambda p: p.relative_to(path).as_posix().encode("utf-8"))
         combined = hashlib.sha256()
         for f in files:
             rel = f.relative_to(path).as_posix()
-            combined.update(f"{SkillHasher._hash_file(f)}  ./{rel}\n".encode())
+            combined.update(f"{SkillHasher._hash_file(f)}  ./{rel}\n".encode("utf-8"))
         return combined.hexdigest()

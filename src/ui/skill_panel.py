@@ -11,6 +11,15 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# Connection status colors used by the remote panel indicator dot.
+STATUS_COLORS = {
+    "online": ("#a6e3a1", "在线"),
+    "offline": ("#f38ba8", "离线"),
+    "checking": ("#f9e2af", "检测中"),
+    "unknown": ("#6c7086", "未连接"),
+}
+
+
 class SkillPanel(QWidget):
     refresh_requested = Signal()
     tool_changed = Signal(str)
@@ -48,6 +57,13 @@ class SkillPanel(QWidget):
             )
             header.addWidget(self._device_combo)
 
+            # Connection status indicator dot + label.
+            self._status_dot = QLabel("●")
+            self._status_text = QLabel()
+            header.addWidget(self._status_dot)
+            header.addWidget(self._status_text)
+            self.set_connection_status("unknown")
+
         header.addStretch()
 
         refresh_btn = QPushButton("↻ 刷新")
@@ -56,6 +72,7 @@ class SkillPanel(QWidget):
             "padding: 2px 10px; border-radius: 3px; font-size: 11px;"
         )
         refresh_btn.clicked.connect(self.refresh_requested.emit)
+        self._refresh_btn = refresh_btn
         header.addWidget(refresh_btn)
 
         layout.addLayout(header)
@@ -162,3 +179,36 @@ class SkillPanel(QWidget):
     def _on_device_selected(self, text: str):
         if text != "未选择远程设备":
             self.device_changed.emit(text)
+
+    # ---- Connection status indicator ----
+
+    def set_connection_status(self, status: str, detail: str = ""):
+        """Update the colored connection-status dot + label.
+
+        status: 'online' | 'offline' | 'checking' | 'unknown'
+        detail: optional tooltip/extended message (used for tooltip).
+        """
+        if not self._device_combo:
+            return
+        color, text = STATUS_COLORS.get(status, STATUS_COLORS["unknown"])
+        if hasattr(self, "_status_dot"):
+            self._status_dot.setStyleSheet(
+                f"color: {color}; font-size: 12px; padding: 0px 2px 0px 6px;"
+            )
+        if hasattr(self, "_status_text"):
+            self._status_text.setStyleSheet(
+                f"color: {color}; font-size: 11px;"
+            )
+            self._status_text.setText(text)
+            self._status_text.setToolTip(detail or text)
+            if hasattr(self, "_status_dot"):
+                self._status_dot.setToolTip(detail or text)
+        # Disable refresh when offline so users don't queue doomed scans.
+        if hasattr(self, "_refresh_btn"):
+            self._refresh_btn.setEnabled(status != "offline")
+            if status == "offline":
+                self._refresh_btn.setToolTip(
+                    "远程不可达，请先在「连接管理」中检查这台机器"
+                )
+            else:
+                self._refresh_btn.setToolTip("")

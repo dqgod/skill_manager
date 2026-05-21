@@ -62,6 +62,34 @@ CONFLICT_OVERWRITE = "overwrite"
 CONFLICT_SKIP = "skip"
 
 
+# --------------- hashing / archive ignore list ---------------
+
+# Files that should be ignored both when computing skill hashes and when
+# building tar archives for sync. Keeps local & remote in sync even when one
+# side carries OS / editor / VCS noise.
+SKILL_IGNORE_FILES = {
+    ".DS_Store",
+    "Thumbs.db",
+    "desktop.ini",
+}
+SKILL_IGNORE_FILE_GLOBS = (
+    "*.swp", "*.swo", "*.tmp", "*.pyc",
+    "*.orig", "*.rej", "*.bak",
+)
+# Directory names anywhere under a skill that should be excluded.
+SKILL_IGNORE_DIRS = {
+    "__pycache__",
+    ".git",
+    ".svn",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".idea",
+    ".vscode",
+    "node_modules",
+}
+
+
 # --------------- storage ---------------
 
 APP_DATA_DIR = Path.home() / ".skill-manager"

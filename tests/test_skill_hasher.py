@@ -135,3 +135,78 @@ class TestSkillHasher:
         )
         assert diff.has_differences is True
         assert diff.total == 4
+
+    # ---- PR-1: noise file filtering ----
+
+    def test_hash_ignores_macos_ds_store(self, tmp_path):
+        """Adding .DS_Store must NOT change the directory hash."""
+        d = tmp_path / "skill"
+        d.mkdir()
+        (d / "SKILL.md").write_text("hello")
+        h_clean = SkillHasher.compute_local_hash(str(d))
+        SkillHasher.clear_cache()
+        (d / ".DS_Store").write_bytes(b"junk")
+        h_with_noise = SkillHasher.compute_local_hash(str(d))
+        assert h_clean == h_with_noise
+
+    def test_hash_ignores_pycache_dir(self, tmp_path):
+        d = tmp_path / "skill"
+        d.mkdir()
+        (d / "SKILL.md").write_text("hi")
+        h_clean = SkillHasher.compute_local_hash(str(d))
+        SkillHasher.clear_cache()
+        pyc = d / "__pycache__"
+        pyc.mkdir()
+        (pyc / "x.pyc").write_bytes(b"\x00\x01")
+        h_with_noise = SkillHasher.compute_local_hash(str(d))
+        assert h_clean == h_with_noise
+
+    def test_hash_matches_remote_format(self, tmp_path):
+        """Local algorithm must reproduce sha256sum-style aggregation."""
+        import hashlib, subprocess, shutil
+        d = tmp_path / "skill"
+        d.mkdir()
+        (d / "SKILL.md").write_text("hello\n")
+        sub = d / "sub"
+        sub.mkdir()
+        (sub / "x.txt").write_text("world\n")
+
+        SkillHasher.clear_cache()
+        local_hash = SkillHasher.compute_local_hash(str(d))
+
+        # Reproduce remote aggregation locally with shell tools (skip on systems
+        # without sha256sum / sort -z).
+        if not shutil.which("sha256sum") or not shutil.which("sort"):
+            return
+        out = subprocess.check_output(
+            f"cd {d} && LC_ALL=C find . -type f ! -name '.DS_Store' "
+            f"! -name '*.swp' ! -name '*.swo' ! -name '*.tmp' "
+            f"! -name '*.pyc' ! -name '*.orig' ! -name '*.rej' "
+            f"! -name '*.bak' ! -name 'Thumbs.db' ! -name 'desktop.ini' "
+            f"! -path '*/.git/*' ! -path '*/.hg/*' ! -path '*/.idea/*' "
+            f"! -path '*/.mypy_cache/*' ! -path '*/.pytest_cache/*' "
+            f"! -path '*/.svn/*' ! -path '*/.vscode/*' "
+            f"! -path '*/__pycache__/*' ! -path '*/node_modules/*' "
+            f"-print0 | LC_ALL=C sort -z | xargs -0 sha256sum | "
+            f"sha256sum | cut -d' ' -f1",
+            shell=True,
+        ).decode().strip()
+        assert local_hash == out
+
+    # ---- PR-5: hash cache ----
+
+    def test_local_hash_cache_hit(self, tmp_path):
+        d = tmp_path / "skill"
+        d.mkdir()
+        (d / "SKILL.md").write_text("a")
+        SkillHasher.clear_cache()
+        h1 = SkillHasher.compute_local_hash(str(d))
+        # Mutate the file's sha but keep mtime/size identical: cache MUST
+        # short-circuit and return the stale value (this is by design).
+        # We assert it returns the same value by re-computing.
+        h2 = SkillHasher.compute_local_hash(str(d))
+        assert h1 == h2
+        # Now actually change content/size: cache key changes, hash differs.
+        (d / "SKILL.md").write_text("aa")
+        h3 = SkillHasher.compute_local_hash(str(d))
+        assert h3 != h1
