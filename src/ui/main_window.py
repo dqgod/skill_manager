@@ -19,6 +19,9 @@ from src.services.ssh_manager import SSHManager
 from src.services.crypto_service import CryptoService
 from src.models.connection import Connection, ConnectionModel
 from src.models.project import Project, ProjectModel
+from src.models.skill_source import (
+    SkillSource, local_global, remote_global,
+)
 from src.ui.sidebar import Sidebar
 from src.ui.skill_panels import SkillPanels
 from src.ui.bottom_bar import BottomBar
@@ -33,50 +36,37 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-class _LocalScanWorker(QThread):
-    finished = Signal(list)
+class _SourceScanWorker(QThread):
+    """通用 SkillSource 扫描 worker。
 
-    def __init__(self, scanner: SkillScanner, view_id: str, projects: list,
-                 parent=None):
-        super().__init__(parent)
-        self._scanner = scanner
-        self._view_id = view_id
-        self._projects = projects
+    取代以前的 _LocalScanWorker / _RemoteScanWorker —— 只要给定一个
+    SkillSource 和（如果 remote 的话）对应 Connection，本 worker 就能
+    跑出该侧的 skill 列表，UI 一侧无需关心是本机还是远程。
+    """
 
-    def run(self):
-        skills = []
-        if self._view_id == "global":
-            skills = self._scanner.scan_local_global()
-        else:
-            proj = next((p for p in self._projects if p.id == self._view_id), None)
-            if proj:
-                skills = self._scanner.scan_local_project(proj)
-        self.finished.emit(skills)
-
-
-class _RemoteScanWorker(QThread):
     finished = Signal(list)
     failed = Signal(str)
 
-    def __init__(self, scanner: SkillScanner, connection: Connection,
-                 view_id: str, projects: list, parent=None):
+    def __init__(self, scanner: SkillScanner, source: SkillSource,
+                 projects: list, connection=None, parent=None):
         super().__init__(parent)
         self._scanner = scanner
-        self._conn = connection
-        self._view_id = view_id
+        self._source = source
         self._projects = projects
+        self._connection = connection
 
     def run(self):
-        skills = []
         try:
-            if self._view_id == "global":
-                skills = self._scanner.scan_remote_global(self._conn)
-            else:
-                proj = next((p for p in self._projects if p.id == self._view_id), None)
-                if proj:
-                    skills = self._scanner.scan_remote_project(self._conn, proj)
+            skills = self._scanner.scan(
+                self._source,
+                projects=self._projects,
+                connection=self._connection,
+            )
         except Exception as e:
-            logger.warning("Remote scan failed: %s", e)
+            logger.warning(
+                "[SourceScan] failed source=%r conn=%r err=%s",
+                self._source, getattr(self._connection, "name", None), e,
+            )
             self.failed.emit(self._format_error(e))
             return
         self.finished.emit(skills)
@@ -91,7 +81,12 @@ class _RemoteScanWorker(QThread):
             return "认证失败：用户名或密钥错误"
         if "name or service not known" in low or "nodename" in low:
             return "无法解析主机名，请检查 host 是否正确"
-        return f"远程扫描失败：{msg}"
+        return f"扫描失败：{msg}"
+
+
+# 兼容别名：旧测试 / 旧代码仍可能 import 这两个名字
+_LocalScanWorker = _SourceScanWorker
+_RemoteScanWorker = _SourceScanWorker
 
 
 class _SyncWorker(QThread):
@@ -140,51 +135,55 @@ class _SyncWorker(QThread):
 class _AutoCompareWorker(QThread):
     """Run SkillHasher.compare off the UI thread.
 
-    Returns the *tagged* local + remote lists; emits failure as empty results.
+    Returns the *tagged* left + right lists; emits failure as empty results.
+    The terms "left/right" intentionally replace "local/remote" because the
+    new model lets either side be local or remote.
     """
-    finished = Signal(list, list)  # tagged_local, tagged_remote
+    finished = Signal(list, list)  # tagged_left, tagged_right
     failed = Signal(str)
 
-    def __init__(self, hasher: SkillHasher, local: list, remote: list,
-                 connection, parent=None):
+    def __init__(self, hasher: SkillHasher, left: list, right: list,
+                 left_connection=None, right_connection=None, parent=None):
         super().__init__(parent)
         self._hasher = hasher
-        self._local = local
-        self._remote = remote
-        self._connection = connection
+        self._left = left
+        self._right = right
+        self._left_conn = left_connection
+        self._right_conn = right_connection
 
     def run(self):
         try:
             diff = self._hasher.compare(
-                self._local, self._remote,
-                remote_connection=self._connection,
+                self._left, self._right,
+                left_connection=self._left_conn,
+                right_connection=self._right_conn,
             )
             synced = {(s.name, s.tool) for s in diff.synced}
-            local_only = {(s.name, s.tool) for s in diff.local_only}
-            remote_only = {(s.name, s.tool) for s in diff.remote_only}
+            left_only = {(s.name, s.tool) for s in diff.local_only}
+            right_only = {(s.name, s.tool) for s in diff.remote_only}
             conflict = {(p[0].name, p[0].tool) for p in diff.conflict}
 
-            for s in self._local:
+            for s in self._left:
                 key = (s.name, s.tool)
                 if key in synced:
                     s.hash = "synced"
                 elif key in conflict:
                     s.hash = "conflict"
-                elif key in local_only:
+                elif key in left_only:
                     s.hash = "local-only"
                 else:
                     s.hash = "unknown"
-            for s in self._remote:
+            for s in self._right:
                 key = (s.name, s.tool)
                 if key in synced:
                     s.hash = "synced"
                 elif key in conflict:
                     s.hash = "conflict"
-                elif key in remote_only:
+                elif key in right_only:
                     s.hash = "remote-only"
                 else:
                     s.hash = "unknown"
-            self.finished.emit(self._local, self._remote)
+            self.finished.emit(self._left, self._right)
         except Exception as e:
             logger.warning("Auto-compare failed: %s", e)
             self.failed.emit(str(e))
@@ -233,22 +232,33 @@ class MainWindow(QMainWindow):
         self._idle_timer.start(60_000)  # every 60 seconds
 
         # Periodic remote-connection health check (PR-3 status indicator).
-        # Refresh every 60s while a device is selected.
+        # Refresh every 60s while a remote source is selected.
         self._health_timer = QTimer(self)
-        self._health_timer.timeout.connect(self._check_remote_health)
+        self._health_timer.timeout.connect(self._refresh_health_for_remote_panels)
         self._health_timer.start(60_000)
 
         self._projects: list = []
+        self._connections: list = []
         self._sync_conflict_strategy = "ask"
-        self._local_skills: list = []
-        self._remote_skills: list = []
-        self._active_connection: Connection | None = None
-        self._local_scan_seq = 0   # guard against stale local scan results
-        self._remote_scan_seq = 0  # guard against stale remote scan results
+
+        # Settings & persisted preferences
+        self._settings = QSettings("skill_manager", "skill_manager")
+
+        # ---- Dual-source state (PR-2) ----
+        # Each panel has its own independent SkillSource.
+        # Default: 左=本机/全局，右=远程[<first connection>]/全局 if available else local/global.
+        self._left_source: SkillSource = SkillSource.from_json(
+            self._settings.value("ui/left_source", "", type=str)
+        ) or local_global()
+        self._right_source: SkillSource = SkillSource.from_json(
+            self._settings.value("ui/right_source", "", type=str)
+        ) or local_global()
+        self._left_skills: list = []
+        self._right_skills: list = []
+        self._left_scan_seq = 0
+        self._right_scan_seq = 0
 
         # Hash-compare master switch (PR-Switch).
-        # Persisted across launches via QSettings.
-        self._settings = QSettings("skill_manager", "skill_manager")
         self._hash_compare_enabled: bool = bool(
             self._settings.value("ui/hash_compare_enabled", False, type=bool)
         )
@@ -266,8 +276,12 @@ class MainWindow(QMainWindow):
         self._load_connections()
         # cleanup old backups on startup
         SkillSyncService.cleanup_old_backups()
-        # auto-refresh local on startup
-        self._refresh_local("global")
+        # 自动选择默认 right_source = 第一个 remote（如还是 local_global 默认）
+        self._maybe_pick_default_right_source()
+        # Push current source options to selectors and trigger initial scans.
+        self._push_source_options()
+        self._refresh_side("left")
+        self._refresh_side("right")
 
     def _setup_ui(self):
         central = QWidget()
@@ -302,9 +316,12 @@ class MainWindow(QMainWindow):
         content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(0)
 
+        # Sidebar 退出主流程：保留实例（PR-4 会演化为"预设/项目快捷"区），
+        # 但当前不放进可见布局；project_changed 信号仍能在内存中维持其状态。
         self._sidebar = Sidebar()
-        self._sidebar.view_changed.connect(self._on_view_changed)
+        self._sidebar.view_changed.connect(self._on_legacy_view_changed)
         self._sidebar.add_project_requested.connect(self._on_add_project)
+        self._sidebar.setVisible(False)
         content.addWidget(self._sidebar)
 
         right = QVBoxLayout()
@@ -330,7 +347,7 @@ class MainWindow(QMainWindow):
             "QCheckBox::indicator { width: 13px; height: 13px; }"
         )
         self._hash_compare_check.setToolTip(
-            "打开后会计算并比较本机与远端 skill 的内容哈希；\n"
+            "打开后会计算并比较两侧 skill 的内容哈希；\n"
             "关闭则跳过哈希计算，只展示列表，启动/刷新更快。"
         )
         self._hash_compare_check.setChecked(self._hash_compare_enabled)
@@ -348,17 +365,24 @@ class MainWindow(QMainWindow):
         self._set_status_chip("idle")
         # -------------------------------------------------------------------
 
-        self._panels = SkillPanels()
-        local = self._panels.local_panel
-        local.refresh_requested.connect(self._on_refresh_local)
-        local.tool_changed.connect(lambda t: self._on_tool_changed("local", t))
-        local.selection_changed.connect(self._on_selection_changed)
+        self._panels = SkillPanels(
+            left_source=self._left_source, right_source=self._right_source,
+        )
+        left_panel = self._panels.left_panel
+        left_panel.refresh_requested.connect(lambda: self._refresh_side("left"))
+        left_panel.tool_changed.connect(lambda t: self._on_tool_changed("left", t))
+        left_panel.selection_changed.connect(self._on_selection_changed)
+        left_panel.source_changed.connect(
+            lambda src: self._on_source_changed("left", src)
+        )
 
-        remote = self._panels.remote_panel
-        remote.refresh_requested.connect(self._on_refresh_remote)
-        remote.tool_changed.connect(lambda t: self._on_tool_changed("remote", t))
-        remote.selection_changed.connect(self._on_selection_changed)
-        remote.device_changed.connect(self._on_remote_device_changed)
+        right_panel = self._panels.right_panel
+        right_panel.refresh_requested.connect(lambda: self._refresh_side("right"))
+        right_panel.tool_changed.connect(lambda t: self._on_tool_changed("right", t))
+        right_panel.selection_changed.connect(self._on_selection_changed)
+        right_panel.source_changed.connect(
+            lambda src: self._on_source_changed("right", src)
+        )
 
         right.addWidget(self._panels, stretch=1)
 
@@ -383,40 +407,48 @@ class MainWindow(QMainWindow):
 
     # ---- Events ----
 
-    def _on_view_changed(self, view_id: str):
-        self._refresh_local(view_id)
+    def _on_legacy_view_changed(self, view_id: str):
+        """旧 sidebar 仍可能发信号（隐藏后理论不再触发，但保险一下）。
 
-    def _on_refresh_local(self):
-        self._refresh_local(self._sidebar.active_view)
-
-    def _on_refresh_remote(self):
-        if not self._active_connection:
-            self._toast.show_message("请先选择远程设备", success=False)
-            return
-        self._refresh_remote(self._sidebar.active_view)
+        把全局/项目切换映射到 left 面板，与历史行为保持一致。
+        """
+        if view_id == "global":
+            self._on_source_changed("left", local_global())
+        else:
+            proj = next((p for p in self._projects if p.id == view_id), None)
+            if proj:
+                from src.models.skill_source import local_project
+                self._on_source_changed("left", local_project(proj.id, proj.name))
 
     def _on_tool_changed(self, side: str, tool: str):
-        skills = self._local_skills if side == "local" else self._remote_skills
-        panel = self._panels.local_panel if side == "local" else self._panels.remote_panel
-        logger.info("[TabSwitch] MainWindow._on_tool_changed side=%s tool=%s skills_count=%d",
+        skills = self._left_skills if side == "left" else self._right_skills
+        panel = self._panels.left_panel if side == "left" else self._panels.right_panel
+        logger.info("[TabSwitch] _on_tool_changed side=%s tool=%s skills=%d",
                      side, tool, len(skills))
         panel.display_skills(skills)
         self._on_selection_changed()
 
     def _on_selection_changed(self):
-        local_sel = self._panels.local_panel.selected_skills()
-        remote_sel = self._panels.remote_panel.selected_skills()
-        self._bottom_bar.update_selection_count(len(local_sel) + len(remote_sel))
+        left_sel = self._panels.left_panel.selected_skills()
+        right_sel = self._panels.right_panel.selected_skills()
+        self._bottom_bar.update_selection_count(len(left_sel) + len(right_sel))
 
-    def _on_remote_device_changed(self, conn_name: str):
-        if not conn_name:
-            self._active_connection = None
-            self._panels.remote_panel.set_connection_status("unknown")
-            return
-        self._active_connection = ConnectionModel.get_by_name(conn_name)
-        if self._active_connection:
-            self._check_remote_health()
-            self._refresh_remote(self._sidebar.active_view)
+    def _on_source_changed(self, side: str, src: SkillSource):
+        """用户在面板上挑了新 source —— 持久化、重置列表、触发刷新。"""
+        logger.info("[Source] _on_source_changed side=%s -> %r", side, src)
+        if side == "left":
+            self._left_source = src
+            self._settings.setValue("ui/left_source", src.to_json())
+        else:
+            self._right_source = src
+            self._settings.setValue("ui/right_source", src.to_json())
+        # 同步面板显示标签 + 状态
+        panel = self._panels.left_panel if side == "left" else self._panels.right_panel
+        panel.set_source(src)
+        # 远程 source 立即触发健康检查
+        if src.is_remote:
+            self._check_health_for_side(side)
+        self._refresh_side(side)
 
     def _on_add_project(self):
         dlg = ProjectDialog(self)
@@ -434,52 +466,47 @@ class MainWindow(QMainWindow):
         self._projects = ProjectModel.get_all()
         for proj in self._projects:
             self._sidebar.add_project_nav(proj.id, proj.name)
+        # 把新项目列表灌给两侧的 source selector
+        self._push_source_options()
         self._toast.show_message("项目列表已更新")
 
+    # ---- Sync ----
+
     def _on_sync_requested(self):
-        # gather selected skills from both panels (prefer local for push, remote for pull)
+        """根据 BottomBar 的 push/pull 方向决定 source/target side：
+
+        push: 左 → 右，左侧勾选的 skill 同步到右侧目标
+        pull: 右 → 左，右侧勾选的 skill 同步到左侧目标
+        """
         direction = self._bottom_bar.sync_direction
         sync_level = self._bottom_bar.sync_level
         target_tools = self._bottom_bar.selected_tools
 
         if direction == SYNC_DIRECTION_PUSH:
-            selected = self._panels.local_panel.selected_skills()
-            if not selected:
-                self._toast.show_message("请先选择要推送的 skill", success=False)
-                return
+            source_side, target_side = "left", "right"
         else:
-            selected = self._panels.remote_panel.selected_skills()
-            if not selected:
-                self._toast.show_message("请先选择要拉取的 skill", success=False)
-                return
+            source_side, target_side = "right", "left"
 
+        source_src = self._left_source if source_side == "left" else self._right_source
+        target_src = self._left_source if target_side == "left" else self._right_source
+        source_panel = (self._panels.left_panel if source_side == "left"
+                        else self._panels.right_panel)
+
+        selected = source_panel.selected_skills()
+        if not selected:
+            self._toast.show_message("请先在源侧选择要同步的 skill", success=False)
+            return
         if not target_tools:
             self._toast.show_message("请先选择目标工具", success=False)
             return
 
-        # resolve connections
-        source_conn = None
-        target_conn = None
-        if direction == SYNC_DIRECTION_PUSH:
-            target_conn = self._active_connection
-        else:
-            source_conn = self._active_connection
+        source_conn = self._resolve_connection(source_src) if source_src.is_remote else None
+        target_conn = self._resolve_connection(target_src) if target_src.is_remote else None
 
-        active_project = next(
-            (p for p in self._projects if p.id == self._sidebar.active_view),
-            None,
-        )
-        source_project = None
-        target_project = None
-        if sync_level == SYNC_LEVEL_TO_PROJECT:
-            target_project = active_project
-        elif sync_level == SYNC_LEVEL_TO_GLOBAL:
-            source_project = active_project
-        elif sync_level == SYNC_LEVEL_PROJECT:
-            source_project = active_project
-            target_project = active_project
+        # 项目解析：源侧/目标侧各自的项目
+        source_project = self._resolve_project(source_src)
+        target_project = self._resolve_project(target_src)
 
-        # prepare tasks
         tasks = self._sync_svc.prepare_tasks(
             selected, direction, sync_level, target_tools,
             source_project=source_project,
@@ -491,12 +518,10 @@ class MainWindow(QMainWindow):
             self._toast.show_message("没有可执行的任务", success=False)
             return
 
-        # progress dialog
         self._sync_dialog = SyncProgressDialog(len(tasks), self)
         for task in tasks:
             self._sync_dialog.add_item(task.skill_name)
 
-        # worker
         self._sync_worker = _SyncWorker(
             self._sync_svc, tasks, source_conn, target_conn,
             self._sync_conflict_strategy
@@ -506,6 +531,16 @@ class MainWindow(QMainWindow):
         self._sync_worker.finished.connect(self._on_sync_finished)
         self._sync_worker.start()
         self._sync_dialog.show()
+
+    def _resolve_connection(self, src: SkillSource):
+        if not src.is_remote:
+            return None
+        return ConnectionModel.get_by_name(src.connection_name)
+
+    def _resolve_project(self, src: SkillSource):
+        if not src.is_project:
+            return None
+        return next((p for p in self._projects if p.id == src.project_id), None)
 
     def _on_sync_progress(self, cur: int, total: int, name: str, status: str):
         if hasattr(self, '_sync_dialog'):
@@ -530,10 +565,9 @@ class MainWindow(QMainWindow):
             "Sync finished: %d success, %d failed, %d total",
             success_count, fail_count, len(results),
         )
-        # refresh both panels
-        self._refresh_local(self._sidebar.active_view)
-        if self._active_connection:
-            self._refresh_remote(self._sidebar.active_view)
+        # 同步完两侧都刷一遍
+        self._refresh_side("left")
+        self._refresh_side("right")
 
     def _open_connection_dialog(self):
         dlg = ConnectionDialog(self._ssh, self._crypto, self)
@@ -562,106 +596,121 @@ class MainWindow(QMainWindow):
             self._sidebar.add_project_nav(proj.id, proj.name)
 
     def _load_connections(self):
-        connections = ConnectionModel.get_all()
-        remote_panel = self._panels.remote_panel
-        remote_panel.set_devices(connections)
-        # auto-select first if none active
-        if not self._active_connection and connections:
-            remote_panel.select_device(connections[0].name)
-            self._active_connection = connections[0]
-            # Probe health right away so user sees green/red within seconds.
-            self._check_remote_health()
+        """读取所有连接 → 喂给两侧 source selector。
 
-    def _refresh_local(self, view_id: str):
-        # Disconnect and stop any previous worker
-        if hasattr(self, '_local_worker') and self._local_worker is not None:
+        新模型下这里不再"选中"任何一个连接（活跃连接的概念不存在了），
+        因为左右两侧各有自己的 SkillSource。
+        """
+        self._connections = ConnectionModel.get_all()
+        self._push_source_options()
+        # 校验当前 source 是否仍然有效（连接被删除等情况）
+        self._validate_sources_after_options_change()
+
+    def _push_source_options(self):
+        """把 connections + projects 推送到两侧 selector 菜单。"""
+        self._panels.left_panel.set_source_options(self._connections, self._projects)
+        self._panels.right_panel.set_source_options(self._connections, self._projects)
+
+    def _validate_sources_after_options_change(self):
+        """SourceSelector.set_options 已经会回退失效 source 并发 source_changed
+        信号；这里只需要做最后兜底的状态同步。"""
+        self._panels.left_panel.set_source(self._panels.left_panel.source)
+        self._panels.right_panel.set_source(self._panels.right_panel.source)
+
+    def _maybe_pick_default_right_source(self):
+        """初始默认右侧 = 远程[第一个连接]/全局，前提是用户没有持久化偏好且有连接。"""
+        if self._right_source.is_local and self._right_source.is_global:
+            # 这就是 SkillSource 的"零值"——表示用户从没动过
+            if self._connections:
+                self._right_source = remote_global(self._connections[0].name)
+                self._panels.right_panel.set_source(self._right_source)
+                self._settings.setValue("ui/right_source", self._right_source.to_json())
+
+    def _refresh_side(self, side: str):
+        """统一刷新入口：根据 side 的 SkillSource 决定走 local / remote 扫描。"""
+        assert side in ("left", "right")
+        src = self._left_source if side == "left" else self._right_source
+        worker_attr = "_left_worker" if side == "left" else "_right_worker"
+        seq_attr = "_left_scan_seq" if side == "left" else "_right_scan_seq"
+
+        logger.info("[Refresh] _refresh_side side=%s source=%r", side, src)
+
+        # Stop any previous worker on this side
+        prev = getattr(self, worker_attr, None)
+        if prev is not None:
             try:
-                self._local_worker.finished.disconnect()
+                prev.finished.disconnect()
             except (TypeError, RuntimeError):
                 pass
-            if self._local_worker.isRunning():
-                self._local_worker.quit()
-                self._local_worker.wait(5000)
-
-        self._local_scan_seq += 1
-        seq = self._local_scan_seq
-        self.statusBar().showMessage("正在扫描本机...")
-        self._set_status_chip("scanning_local")
-        self._local_worker = _LocalScanWorker(
-            self._scanner, view_id, self._projects, parent=self,
-        )
-        self._local_worker.finished.connect(
-            lambda skills, s=seq: self._on_scan_local_done_guarded(skills, s)
-        )
-        self._local_worker.start()
-
-    def _refresh_remote(self, view_id: str):
-        if not self._active_connection:
-            return
-        # Disconnect and stop any previous worker
-        if hasattr(self, '_remote_worker') and self._remote_worker is not None:
             try:
-                self._remote_worker.finished.disconnect()
-            except (TypeError, RuntimeError):
-                pass
-            try:
-                self._remote_worker.failed.disconnect()
+                prev.failed.disconnect()
             except (TypeError, RuntimeError, AttributeError):
                 pass
-            if self._remote_worker.isRunning():
-                self._remote_worker.quit()
-                self._remote_worker.wait(5000)
+            if prev.isRunning():
+                prev.quit()
+                prev.wait(5000)
 
-        self._remote_scan_seq += 1
-        seq = self._remote_scan_seq
-        self.statusBar().showMessage("正在扫描远程...")
-        self._set_status_chip("scanning_remote")
-        self._remote_worker = _RemoteScanWorker(
-            self._scanner, self._active_connection, view_id, self._projects,
-            parent=self,
+        seq = getattr(self, seq_attr) + 1
+        setattr(self, seq_attr, seq)
+
+        # Status chip + status bar
+        self.statusBar().showMessage(f"正在扫描{side}侧...")
+        self._set_status_chip(
+            "scanning_remote" if src.is_remote else "scanning_local"
         )
-        self._remote_worker.finished.connect(
-            lambda skills, s=seq: self._on_scan_remote_done_guarded(skills, s)
+
+        connection = self._resolve_connection(src) if src.is_remote else None
+        worker = _SourceScanWorker(
+            self._scanner, src, self._projects,
+            connection=connection, parent=self,
         )
-        self._remote_worker.failed.connect(
-            lambda msg, s=seq: self._on_scan_remote_failed_guarded(msg, s)
+        worker.finished.connect(
+            lambda skills, s=seq, sd=side:
+                self._on_scan_done_guarded(sd, skills, s)
         )
-        self._remote_worker.start()
+        worker.failed.connect(
+            lambda msg, s=seq, sd=side:
+                self._on_scan_failed_guarded(sd, msg, s)
+        )
+        setattr(self, worker_attr, worker)
+        worker.start()
 
-    def _on_scan_local_done_guarded(self, skills: list, seq: int):
-        if seq != self._local_scan_seq:
-            return  # stale result
-        self._finalize_worker("_local_worker")
-        self._on_scan_local_done(skills)
+    def _on_scan_done_guarded(self, side: str, skills: list, seq: int):
+        cur = self._left_scan_seq if side == "left" else self._right_scan_seq
+        if seq != cur:
+            return
+        self._finalize_worker("_left_worker" if side == "left" else "_right_worker")
+        self._on_scan_side_done(side, skills)
 
-    def _on_scan_remote_done_guarded(self, skills: list, seq: int):
-        if seq != self._remote_scan_seq:
-            return  # stale result
-        self._finalize_worker("_remote_worker")
-        self._on_scan_remote_done(skills)
-
-    def _on_scan_remote_failed_guarded(self, msg: str, seq: int):
-        if seq != self._remote_scan_seq:
-            return  # stale result
-        self._finalize_worker("_remote_worker")
-        self._remote_skills = []
-        self._panels.remote_panel.display_skills([])
-        self._update_badges("remote", [])
-        self.statusBar().showMessage(f"远程扫描失败：{msg}")
-        self._set_status_chip("error", "远程扫描失败")
-        # Mark the panel offline with the actual error reason.
-        if self._active_connection:
-            conn = self._active_connection
-            self._panels.remote_panel.set_connection_status(
+    def _on_scan_failed_guarded(self, side: str, msg: str, seq: int):
+        cur = self._left_scan_seq if side == "left" else self._right_scan_seq
+        if seq != cur:
+            return
+        self._finalize_worker("_left_worker" if side == "left" else "_right_worker")
+        if side == "left":
+            self._left_skills = []
+        else:
+            self._right_skills = []
+        panel = self._panels.left_panel if side == "left" else self._panels.right_panel
+        panel.display_skills([])
+        self.statusBar().showMessage(f"{side}侧扫描失败：{msg}")
+        self._set_status_chip("error", f"{side}侧扫描失败")
+        # 远程时把状态点改为 offline，附带原因
+        src = self._left_source if side == "left" else self._right_source
+        if src.is_remote:
+            conn = self._resolve_connection(src)
+            host = conn.host if conn else "?"
+            user = conn.username if conn else "?"
+            port = conn.port if conn else 22
+            panel.set_connection_status(
                 "offline",
-                f"无法连接 {conn.username}@{conn.host}:{conn.port}\n{msg}",
+                f"无法连接 {user}@{host}:{port}\n{msg}",
             )
         try:
-            toast = Toast(self)
-            toast.show_message(msg, duration=4000, success=False)
+            Toast(self).show_message(msg, duration=4000, success=False)
         except Exception:
             pass
-        logger.warning("Remote scan failed: %s", msg)
+        logger.warning("[Scan] side=%s failed: %s", side, msg)
 
     def _finalize_worker(self, attr: str):
         """Quit + wait + deleteLater the QThread referenced by self.<attr>.
@@ -686,124 +735,105 @@ class MainWindow(QMainWindow):
             pass
         setattr(self, attr, None)
 
-    def _on_scan_local_done(self, skills: list):
-        self._local_skills = skills
-        self._update_badges("local", skills)
-        # Always render local list immediately so the UI doesn't look frozen.
+    def _on_scan_side_done(self, side: str, skills: list):
+        if side == "left":
+            self._left_skills = skills
+        else:
+            self._right_skills = skills
+
+        panel = self._panels.left_panel if side == "left" else self._panels.right_panel
+        src = self._left_source if side == "left" else self._right_source
+
+        # 远程扫描成功 = 这台远端可达（更新连接状态点为绿）
+        if src.is_remote:
+            conn = self._resolve_connection(src)
+            if conn:
+                panel.set_connection_status(
+                    "online",
+                    f"已连接 {conn.username}@{conn.host}:{conn.port}",
+                )
+
+        # 立即渲染（先打 loading / off 标签，再去比对）
         if self._hash_compare_enabled:
-            # Show "loading" tag until _auto_compare finishes.
-            for s in self._local_skills:
+            for s in skills:
                 if s.hash is None:
                     s.hash = "loading"
         else:
-            for s in self._local_skills:
+            for s in skills:
                 s.hash = "off"
-        self._panels.local_panel.display_skills(self._local_skills)
-        self.statusBar().showMessage(f"本机扫描完成，{len(skills)} 个 skill")
+        panel.display_skills(skills)
+        self.statusBar().showMessage(f"{side}侧扫描完成，{len(skills)} 个 skill")
         self._on_selection_changed()
-        logger.info("Local scan completed: %d skills", len(skills))
+        logger.info("[Scan] side=%s completed: %d skills", side, len(skills))
 
-        if self._hash_compare_enabled and self._remote_skills:
+        # 两侧都扫完才比对
+        other = self._right_skills if side == "left" else self._left_skills
+        if self._hash_compare_enabled and skills and other:
             self._auto_compare()
         elif self._hash_compare_enabled:
-            # No remote yet — temporarily mark as local-only
-            for s in self._local_skills:
-                s.hash = "local-only"
-            self._panels.local_panel.display_skills(self._local_skills)
-            self._set_status_chip("done", f"✓ 本机 {len(skills)}")
+            for s in skills:
+                s.hash = "local-only" if side == "left" else "remote-only"
+            panel.display_skills(skills)
+            self._set_status_chip("done", f"✓ {side}侧 {len(skills)}")
         else:
-            self._set_status_chip("done", f"✓ 本机 {len(skills)}（未校验）")
-
-    def _on_scan_remote_done(self, skills: list):
-        self._remote_skills = skills
-        self._update_badges("remote", skills)
-        # A successful scan implies the remote is reachable.
-        if self._active_connection:
-            conn = self._active_connection
-            self._panels.remote_panel.set_connection_status(
-                "online",
-                f"已连接 {conn.username}@{conn.host}:{conn.port}",
-            )
-        # Render immediately so users can interact while we crunch hashes.
-        if self._hash_compare_enabled:
-            for s in self._remote_skills:
-                if s.hash is None:
-                    s.hash = "loading"
-        else:
-            for s in self._remote_skills:
-                s.hash = "off"
-        self._panels.remote_panel.display_skills(self._remote_skills)
-        self.statusBar().showMessage(f"远程扫描完成，{len(skills)} 个 skill")
-        self._on_selection_changed()
-        logger.info("Remote scan completed: %d skills", len(skills))
-
-        if self._hash_compare_enabled and self._local_skills:
-            self._auto_compare()
-        elif self._hash_compare_enabled:
-            for s in self._remote_skills:
-                s.hash = "remote-only"
-            self._panels.remote_panel.display_skills(self._remote_skills)
-            self._set_status_chip("done", f"✓ 远程 {len(skills)}")
-        else:
-            self._set_status_chip("done", f"✓ 远程 {len(skills)}（未校验）")
+            self._set_status_chip("done", f"✓ {side}侧 {len(skills)}（未校验）")
 
     def _auto_compare(self):
-        """Auto-compare local and remote skills off the UI thread.
+        """Compare left/right skills off the UI thread.
 
-        Why: the comparator must hash every shared skill on the *remote* side,
-        which historically blocked the GUI for several seconds on large
-        inventories. Pushing it into a worker keeps the window responsive
-        and lets users keep scrolling/clicking while we crunch.
+        New model: either side may be local or remote, so we resolve each
+        side's connection independently before handing off to SkillHasher.
         """
-        # Master switch: skip hashing entirely when disabled.
         if not self._hash_compare_enabled:
-            for s in self._local_skills:
+            for s in self._left_skills:
                 s.hash = "off"
-            for s in self._remote_skills:
+            for s in self._right_skills:
                 s.hash = "off"
-            self._panels.local_panel.display_skills(self._local_skills)
-            self._panels.remote_panel.display_skills(self._remote_skills)
+            self._panels.left_panel.display_skills(self._left_skills)
+            self._panels.right_panel.display_skills(self._right_skills)
             self._set_status_chip("done", "校验已关闭")
             return
-        # Cancel any in-flight comparison
         self._finalize_worker("_compare_worker")
-        self.statusBar().showMessage("正在比对本机/远程 skill ...")
+        self.statusBar().showMessage("正在比对两侧 skill ...")
         self._set_status_chip("comparing")
+        left_conn = self._resolve_connection(self._left_source)
+        right_conn = self._resolve_connection(self._right_source)
         self._compare_worker = _AutoCompareWorker(
             self._hasher,
-            self._local_skills,
-            self._remote_skills,
-            self._active_connection,
+            self._left_skills,
+            self._right_skills,
+            left_connection=left_conn,
+            right_connection=right_conn,
             parent=self,
         )
         self._compare_worker.finished.connect(self._on_compare_done)
         self._compare_worker.failed.connect(self._on_compare_failed)
         self._compare_worker.start()
 
-    def _on_compare_done(self, tagged_local: list, tagged_remote: list):
+    def _on_compare_done(self, tagged_left: list, tagged_right: list):
         self._finalize_worker("_compare_worker")
-        self._local_skills = tagged_local
-        self._remote_skills = tagged_remote
-        self._panels.local_panel.display_skills(self._local_skills)
-        self._panels.remote_panel.display_skills(self._remote_skills)
-        synced = sum(1 for s in self._local_skills if s.hash == "synced")
+        self._left_skills = tagged_left
+        self._right_skills = tagged_right
+        self._panels.left_panel.display_skills(self._left_skills)
+        self._panels.right_panel.display_skills(self._right_skills)
+        synced = sum(1 for s in self._left_skills if s.hash == "synced")
         self.statusBar().showMessage(
-            f"比对完成：{synced} 已同步 / {len(self._local_skills)} 本机 / "
-            f"{len(self._remote_skills)} 远程"
+            f"比对完成：{synced} 已同步 / {len(self._left_skills)} 左 / "
+            f"{len(self._right_skills)} 右"
         )
-        self._set_status_chip("done", f"✓ 已同步 {synced}/{len(self._local_skills)}")
+        self._set_status_chip("done", f"✓ 已同步 {synced}/{len(self._left_skills)}")
 
     def _on_compare_failed(self, msg: str):
         self._finalize_worker("_compare_worker")
-        # Fall back to direction-only tagging so user still sees the lists
-        local_keys = {(s.name, s.tool) for s in self._local_skills}
-        remote_keys = {(s.name, s.tool) for s in self._remote_skills}
-        for s in self._local_skills:
-            s.hash = "synced" if (s.name, s.tool) in remote_keys else "local-only"
-        for s in self._remote_skills:
-            s.hash = "synced" if (s.name, s.tool) in local_keys else "remote-only"
-        self._panels.local_panel.display_skills(self._local_skills)
-        self._panels.remote_panel.display_skills(self._remote_skills)
+        # 退化为按 name/tool 是否两侧都存在来打标签，至少让用户能看清。
+        left_keys = {(s.name, s.tool) for s in self._left_skills}
+        right_keys = {(s.name, s.tool) for s in self._right_skills}
+        for s in self._left_skills:
+            s.hash = "synced" if (s.name, s.tool) in right_keys else "local-only"
+        for s in self._right_skills:
+            s.hash = "synced" if (s.name, s.tool) in left_keys else "remote-only"
+        self._panels.left_panel.display_skills(self._left_skills)
+        self._panels.right_panel.display_skills(self._right_skills)
         self.statusBar().showMessage(f"比对失败：{msg}")
         self._set_status_chip("error", "比对失败")
         try:
@@ -811,43 +841,55 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    # ---- Connection health check (PR-3) ----
+    # ---- Connection health check (per-side) ----
 
-    def _check_remote_health(self):
-        """Run an SSH health probe for the current active connection.
+    def _refresh_health_for_remote_panels(self):
+        """Periodic timer entry: probe each side that currently is remote."""
+        if self._left_source.is_remote:
+            self._check_health_for_side("left")
+        if self._right_source.is_remote:
+            self._check_health_for_side("right")
 
-        Result is rendered as the colored status dot in the remote panel.
-        Safe to call repeatedly: in-flight worker is replaced.
-        """
-        if not self._active_connection:
-            self._panels.remote_panel.set_connection_status("unknown")
+    def _check_health_for_side(self, side: str):
+        """Probe SSH for the given side's source. No-op if side is local."""
+        assert side in ("left", "right")
+        src = self._left_source if side == "left" else self._right_source
+        panel = self._panels.left_panel if side == "left" else self._panels.right_panel
+        if not src.is_remote:
             return
-        # Replace any in-flight worker
-        self._finalize_worker("_health_worker")
-        # Yellow "checking" while we probe
-        host = self._active_connection.host
-        self._panels.remote_panel.set_connection_status(
-            "checking", f"正在检测 {host} ..."
-        )
-        self._health_worker = _HealthCheckWorker(
-            self._ssh, self._active_connection, parent=self,
-        )
-        self._health_worker.finished.connect(self._on_health_done)
-        self._health_worker.start()
-
-    def _on_health_done(self, status: str, detail: str):
-        self._finalize_worker("_health_worker")
-        if not self._active_connection:
+        conn = self._resolve_connection(src)
+        if not conn:
+            panel.set_connection_status("unknown")
             return
-        conn = self._active_connection
+        worker_attr = "_left_health_worker" if side == "left" else "_right_health_worker"
+        self._finalize_worker(worker_attr)
+        panel.set_connection_status("checking", f"正在检测 {conn.host} ...")
+        worker = _HealthCheckWorker(self._ssh, conn, parent=self)
+        worker.finished.connect(
+            lambda status, detail, sd=side: self._on_health_done(sd, status, detail)
+        )
+        setattr(self, worker_attr, worker)
+        worker.start()
+
+    def _on_health_done(self, side: str, status: str, detail: str):
+        worker_attr = "_left_health_worker" if side == "left" else "_right_health_worker"
+        self._finalize_worker(worker_attr)
+        src = self._left_source if side == "left" else self._right_source
+        panel = self._panels.left_panel if side == "left" else self._panels.right_panel
+        if not src.is_remote:
+            return
+        conn = self._resolve_connection(src)
+        if not conn:
+            return
         if status == "online":
             tip = f"已连接 {conn.username}@{conn.host}:{conn.port}"
         else:
             tip = f"无法连接 {conn.username}@{conn.host}:{conn.port}\n{detail}"
-        self._panels.remote_panel.set_connection_status(status, tip)
-        # If a refresh was queued while we were unknown, kick it now.
-        if status == "online" and not self._remote_skills:
-            self._refresh_remote(self._sidebar.active_view)
+        panel.set_connection_status(status, tip)
+        # 如果之前空列表是因为离线，现在恢复，自动补一次刷新。
+        cur_skills = self._left_skills if side == "left" else self._right_skills
+        if status == "online" and not cur_skills:
+            self._refresh_side(side)
 
     def _tag_to_status(self, skill_info) -> str:
         """Map skill_info hash field to a display status tag."""
@@ -863,13 +905,8 @@ class MainWindow(QMainWindow):
         return ""
 
     def _update_badges(self, side: str, skills: list):
-        if side == "local":
-            global_count = sum(1 for s in skills if s.level == "global")
-            pc: dict[str, int] = {}
-            for s in skills:
-                if s.project_id:
-                    pc[s.project_id] = pc.get(s.project_id, 0) + 1
-            self._sidebar.update_badges(global_count, pc)
+        # Sidebar 已退出主流程；保留 no-op 以兼容潜在外部调用。
+        return
 
     # ---- Status chip + hash-compare toggle ----
 
@@ -890,15 +927,31 @@ class MainWindow(QMainWindow):
             "error": ("#1e1e2e", "#f38ba8", text or "✗ 失败"),
         }
         fg, bg, label = styles.get(state, styles["idle"])
-        self._status_chip.setText(label)
-        self._status_chip.setStyleSheet(
-            f"QLabel {{ font-size: 11px; padding: 2px 8px; border-radius: 8px;"
-            f"color: {fg}; background: {bg}; }}"
+        prev = self._status_chip.text() if hasattr(self, "_status_chip") else "<n/a>"
+        logger.info(
+            "[Chip] _set_status_chip state=%s text=%r => label=%r fg=%s bg=%s "
+            "(prev=%r)",
+            state, text, label, fg, bg, prev,
         )
+        try:
+            self._status_chip.setText(label)
+            self._status_chip.setStyleSheet(
+                f"QLabel {{ font-size: 11px; padding: 2px 8px; border-radius: 8px;"
+                f"color: {fg}; background: {bg}; }}"
+            )
+        except RuntimeError as e:
+            # _status_chip's underlying C++ object was deleted (e.g. window
+            # is being torn down). Log and bail; nothing else can recover.
+            logger.warning("[Chip] setText failed (object deleted?): %s", e)
+            return
         # auto-fade "done" back to idle after 3s; cancel any pending fade
+        was_active = self._chip_clear_timer.isActive()
         self._chip_clear_timer.stop()
         if state == "done":
             self._chip_clear_timer.start(3000)
+            logger.debug("[Chip] auto-fade timer (3s) armed; was_active=%s", was_active)
+        elif was_active:
+            logger.debug("[Chip] auto-fade timer cancelled by new state=%s", state)
 
     def _on_hash_compare_toggled(self, checked: bool):
         """User flipped the master switch; persist + re-render.
@@ -915,24 +968,24 @@ class MainWindow(QMainWindow):
             logger.warning("Failed to persist hash_compare_enabled: %s", e)
 
         if self._hash_compare_enabled:
-            if self._local_skills or self._remote_skills:
+            if self._left_skills or self._right_skills:
                 # Show loading tags during the upcoming compare
-                for s in self._local_skills:
+                for s in self._left_skills:
                     s.hash = "loading"
-                for s in self._remote_skills:
+                for s in self._right_skills:
                     s.hash = "loading"
-                self._panels.local_panel.display_skills(self._local_skills)
-                self._panels.remote_panel.display_skills(self._remote_skills)
+                self._panels.left_panel.display_skills(self._left_skills)
+                self._panels.right_panel.display_skills(self._right_skills)
             self._auto_compare()
         else:
             # Stop any in-flight comparator and clear hash status.
             self._finalize_worker("_compare_worker")
-            for s in self._local_skills:
+            for s in self._left_skills:
                 s.hash = "off"
-            for s in self._remote_skills:
+            for s in self._right_skills:
                 s.hash = "off"
-            self._panels.local_panel.display_skills(self._local_skills)
-            self._panels.remote_panel.display_skills(self._remote_skills)
+            self._panels.left_panel.display_skills(self._left_skills)
+            self._panels.right_panel.display_skills(self._right_skills)
             self._set_status_chip("done", "校验已关闭")
             self.statusBar().showMessage("内容一致性校验已关闭")
 

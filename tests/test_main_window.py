@@ -54,6 +54,7 @@ def test_on_project_changed_removes_stale_nav(monkeypatch, tmp_path):
         _sidebar=SidebarStub(),
         _toast=ToastStub(),
         _projects=[],
+        _push_source_options=MagicMock(),
     )
 
     MainWindow._on_project_changed(fake)
@@ -61,6 +62,7 @@ def test_on_project_changed_removes_stale_nav(monkeypatch, tmp_path):
     assert fake._sidebar.removed == ["old-project"]
     assert fake._sidebar.added == [("new-project", "new-project")]
     assert fake._toast.messages == [("项目列表已更新", True)]
+    fake._push_source_options.assert_called_once()
 
 
 def test_on_sync_progress_advances_on_failed_and_skipped():
@@ -86,8 +88,11 @@ def _mk_skill(name: str, tool: str = "codex", device_type: str = "local") -> Ski
 
 class _PanelsStub:
     def __init__(self):
-        self.local_panel = MagicMock()
-        self.remote_panel = MagicMock()
+        self.left_panel = MagicMock()
+        self.right_panel = MagicMock()
+        # Backward-compat aliases (production code also exposes these).
+        self.local_panel = self.left_panel
+        self.remote_panel = self.right_panel
 
 
 def _build_toggle_fake(enabled_initial: bool, has_skills: bool = True):
@@ -95,15 +100,20 @@ def _build_toggle_fake(enabled_initial: bool, has_skills: bool = True):
     settings = MagicMock()
     settings.setValue = MagicMock()
     panels = _PanelsStub()
-    locals_ = [_mk_skill("a"), _mk_skill("b")] if has_skills else []
-    remotes = [_mk_skill("a", device_type="remote")] if has_skills else []
+    lefts = [_mk_skill("a"), _mk_skill("b")] if has_skills else []
+    rights = [_mk_skill("a", device_type="remote")] if has_skills else []
     fake = SimpleNamespace(
         _hash_compare_enabled=enabled_initial,
         _settings=settings,
-        _local_skills=locals_,
-        _remote_skills=remotes,
+        _left_skills=lefts,
+        _right_skills=rights,
+        # Legacy aliases retained so older tests can still inspect them.
+        _local_skills=lefts,
+        _remote_skills=rights,
         _panels=panels,
-        _active_connection=None,
+        _left_source=MagicMock(is_remote=False),
+        _right_source=MagicMock(is_remote=True),
+        _resolve_connection=MagicMock(return_value=None),
         _hasher=MagicMock(),
         _set_status_chip=MagicMock(),
         _finalize_worker=MagicMock(),
@@ -121,8 +131,8 @@ def test_hash_compare_toggle_off_marks_off_and_skips_compare():
     MainWindow._on_hash_compare_toggled(fake, False)
 
     assert fake._hash_compare_enabled is False
-    assert all(s.hash == "off" for s in fake._local_skills)
-    assert all(s.hash == "off" for s in fake._remote_skills)
+    assert all(s.hash == "off" for s in fake._left_skills)
+    assert all(s.hash == "off" for s in fake._right_skills)
     fake._settings.setValue.assert_called_with(
         "ui/hash_compare_enabled", False
     )
@@ -150,6 +160,6 @@ def test_auto_compare_short_circuits_when_disabled():
     # Calling _auto_compare directly should NOT touch the hasher when off.
     MainWindow._auto_compare(fake)
     fake._hasher.compare.assert_not_called()
-    assert all(s.hash == "off" for s in fake._local_skills)
-    assert all(s.hash == "off" for s in fake._remote_skills)
+    assert all(s.hash == "off" for s in fake._left_skills)
+    assert all(s.hash == "off" for s in fake._right_skills)
     fake._set_status_chip.assert_called()

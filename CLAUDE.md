@@ -98,6 +98,35 @@ Three-layer architecture:
 
 Skill identity is `(name, tool)` — same name with different tools are different skills. Hash-based comparison detects content divergence. Skills are ephemeral (not persisted to DB), discovered fresh on each scan.
 
+### Dual-source model (since v2)
+
+The main window is **two independent panels**, each driven by a `SkillSource`:
+
+```
+SkillSource(device_kind, connection_name, scope, project_id, project_name)
+  device_kind ∈ {"local", "remote"}
+  scope       ∈ {"global", "project"}
+```
+
+→ 4 source types per side:
+- `local + global` — 本机 / 全局
+- `local + project` — 本机 / 项目 X
+- `remote + global` — 远程[server] / 全局
+- `remote + project` — 远程[server] / 项目 Y
+
+→ 16 combinations across the two panels (any-to-any compare/sync).
+
+**Implementation hubs:**
+- [src/models/skill_source.py](src/models/skill_source.py) — frozen dataclass + factories + JSON persistence
+- [src/services/skill_scanner.py](src/services/skill_scanner.py) — `scan(source, projects, connection)` unified entry
+- [src/services/skill_hasher.py](src/services/skill_hasher.py) — `compare(left, right, *, left_connection, right_connection)` (legacy `remote_connection` kw still aliased)
+- [src/ui/widgets/source_selector.py](src/ui/widgets/source_selector.py) — button + tree QMenu replacing the old device combo
+- [src/ui/main_window.py](src/ui/main_window.py) — `_left_source` / `_right_source` state, `_refresh_side(side)` per-panel refresh, per-side health check workers
+
+**Persistence:** `_left_source` / `_right_source` are stored in QSettings (`ui/left_source`, `ui/right_source`) as JSON via `SkillSource.to_json()`.
+
+**Sidebar:** the legacy left sidebar is hidden via `setVisible(False)` (kept around for a future "preset/quick-pick" reincarnation).
+
 ---
 
 ## Behavioral Guidelines

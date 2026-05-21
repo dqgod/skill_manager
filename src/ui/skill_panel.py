@@ -1,22 +1,25 @@
-"""单个 Skill 面板：标题栏 + 工具 Tab + 图例 + SkillList"""
+"""单个 Skill 面板：标题栏 + Source 选择器 + 工具 Tab + 图例 + SkillList"""
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QButtonGroup
 )
 from PySide6.QtCore import Qt, Signal
 
+from src.models.skill_source import SkillSource, local_global
 from src.ui.skill_list_widget import SkillListWidget
+from src.ui.widgets.source_selector import SourceSelector
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-# Connection status colors used by the remote panel indicator dot.
+# Connection status colors used by remote source indicator.
 STATUS_COLORS = {
     "online": ("#a6e3a1", "在线"),
     "offline": ("#f38ba8", "离线"),
     "checking": ("#f9e2af", "检测中"),
     "unknown": ("#6c7086", "未连接"),
+    "local": ("#a6e3a1", "本机"),
 }
 
 
@@ -24,14 +27,13 @@ class SkillPanel(QWidget):
     refresh_requested = Signal()
     tool_changed = Signal(str)
     selection_changed = Signal()
-    device_changed = Signal(str)
+    source_changed = Signal(object)  # emits SkillSource
 
-    def __init__(self, title: str, show_device_selector: bool = False, parent=None):
+    def __init__(self, title: str, source: SkillSource | None = None, parent=None):
         super().__init__(parent)
         self._title = title
-        self._show_device_selector = show_device_selector
+        self._source: SkillSource = source or local_global()
         self._current_tool = "codex"
-        self._device_combo = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -47,22 +49,21 @@ class SkillPanel(QWidget):
         title_label.setStyleSheet("font-weight: 600; font-size: 12px; color: #cdd6f4;")
         header.addWidget(title_label)
 
-        if self._show_device_selector:
-            from PySide6.QtWidgets import QComboBox
-            self._device_combo = QComboBox()
-            self._device_combo.setFixedWidth(160)
-            self._device_combo.addItem("未选择远程设备")
-            self._device_combo.currentTextChanged.connect(
-                self._on_device_selected
-            )
-            header.addWidget(self._device_combo)
+        # Source selector (replaces the old device combo).
+        # Always visible: every panel can be either local or remote.
+        self._source_selector = SourceSelector(self._source)
+        self._source_selector.source_changed.connect(self._on_source_changed_inner)
+        header.addWidget(self._source_selector)
 
-            # Connection status indicator dot + label.
-            self._status_dot = QLabel("●")
-            self._status_text = QLabel()
-            header.addWidget(self._status_dot)
-            header.addWidget(self._status_text)
-            self.set_connection_status("unknown")
+        # Connection status indicator dot + label.
+        # For a local source it's just a静态 "本机/已就绪" 标签；
+        # for a remote source it轮询健康检查结果。
+        self._status_dot = QLabel("●")
+        self._status_text = QLabel()
+        header.addWidget(self._status_dot)
+        header.addWidget(self._status_text)
+        # 初始状态：根据 source 类型决定
+        self._sync_status_for_source()
 
         header.addStretch()
 
@@ -150,46 +151,43 @@ class SkillPanel(QWidget):
     def selected_skills(self):
         return self.skill_list.selected_skills()
 
-    def set_devices(self, connections: list):
-        """Populate device selector with connection names."""
-        if not self._device_combo:
-            return
-        current = self._device_combo.currentText()
-        self._device_combo.blockSignals(True)
-        self._device_combo.clear()
-        if not connections:
-            self._device_combo.addItem("未选择远程设备")
+    # ---- Source 相关 ----
+
+    @property
+    def source(self) -> SkillSource:
+        return self._source
+
+    def set_source(self, source: SkillSource):
+        """以编程方式更新当前 source（不触发 source_changed 信号）。"""
+        self._source = source
+        self._source_selector.set_source(source, emit=False)
+        self._sync_status_for_source()
+
+    def set_source_options(self, connections, projects):
+        """供主窗口调用：把当前 connections/projects 喂给选择器菜单。"""
+        self._source_selector.set_options(connections, projects)
+
+    def _on_source_changed_inner(self, src: SkillSource):
+        """SourceSelector 用户操作变更 → 同步本地 _source 并对外广播。"""
+        self._source = src
+        self._sync_status_for_source()
+        self.source_changed.emit(src)
+
+    def _sync_status_for_source(self):
+        """根据当前 source 重置状态点：本机就直接绿；远程则置 unknown 等待健康检查。"""
+        if self._source.is_local:
+            self.set_connection_status("local", "本机始终在线")
         else:
-            for conn in connections:
-                self._device_combo.addItem(conn.name)
-        # restore selection
-        idx = self._device_combo.findText(current)
-        if idx >= 0:
-            self._device_combo.setCurrentIndex(idx)
-        self._device_combo.blockSignals(False)
-
-    def select_device(self, name: str):
-        """Select a device by name."""
-        if not self._device_combo:
-            return
-        idx = self._device_combo.findText(name)
-        if idx >= 0:
-            self._device_combo.setCurrentIndex(idx)
-
-    def _on_device_selected(self, text: str):
-        if text != "未选择远程设备":
-            self.device_changed.emit(text)
+            self.set_connection_status("unknown")
 
     # ---- Connection status indicator ----
 
     def set_connection_status(self, status: str, detail: str = ""):
-        """Update the colored connection-status dot + label.
+        """Update the colored status dot + label.
 
-        status: 'online' | 'offline' | 'checking' | 'unknown'
+        status: 'online' | 'offline' | 'checking' | 'unknown' | 'local'
         detail: optional tooltip/extended message (used for tooltip).
         """
-        if not self._device_combo:
-            return
         color, text = STATUS_COLORS.get(status, STATUS_COLORS["unknown"])
         if hasattr(self, "_status_dot"):
             self._status_dot.setStyleSheet(

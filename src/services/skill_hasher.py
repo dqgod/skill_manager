@@ -151,9 +151,28 @@ class SkillHasher:
 
     def compare(self, local: list[SkillInfo],
                 remote: list[SkillInfo],
-                remote_connection: Optional[Connection] = None) -> DiffResult:
-        """Compare two skill lists and classify each skill."""
+                remote_connection: Optional[Connection] = None,
+                *,
+                left_connection: Optional[Connection] = None,
+                right_connection: Optional[Connection] = None) -> DiffResult:
+        """Compare two skill lists and classify each skill.
+
+        New dual-source model: ``local`` / ``remote`` parameter names are
+        kept for backward compatibility, but they really mean "left" and
+        "right" — either side may now be a remote source. Hashing on each
+        side is dispatched based on whether a connection was supplied for
+        that side.
+
+        Connection-resolution rules (in priority order):
+          - left side  → ``left_connection`` if given else None (= local FS)
+          - right side → ``right_connection`` if given else
+                          ``remote_connection`` (legacy alias) else None
+        """
         result = DiffResult()
+
+        # Resolve per-side connections (legacy API back-compat).
+        left_conn = left_connection
+        right_conn = right_connection if right_connection is not None else remote_connection
 
         # index by key
         local_by_key: dict[str, SkillInfo] = {}
@@ -171,43 +190,45 @@ class SkillHasher:
         all_keys = set(local_by_key.keys()) | set(remote_by_key.keys())
 
         # ---- Bulk-hash phase ----------------------------------------------
-        # Pre-hash all skills that need hashing in one shot, both locally
-        # (cached on disk anyway) and on the remote (one SSH round-trip
-        # instead of N) — same result as the old per-skill loop, much faster.
+        # Hash skills that appear on *both* sides — those are the only ones
+        # whose hashes we actually need for the synced/conflict decision.
         intersect_keys = [k for k in all_keys
                           if k in local_by_key and k in remote_by_key]
 
-        # local: just compute (SkillHasher caches nothing yet, but I/O is fast)
-        for k in intersect_keys:
-            l = local_by_key[k]
-            if l.hash is None or len(l.hash) != 64:
-                l.hash = self.compute_local_hash(l.path)
-
-        # remote: batch
-        if intersect_keys and remote_connection and self._ssh:
-            need_remote: list[str] = []
-            for k in intersect_keys:
-                r = remote_by_key[k]
-                if r.device_type == "remote" and (r.hash is None or len(r.hash) != 64):
-                    need_remote.append(r.path)
-            if need_remote:
-                try:
-                    bulk = self._ssh.compute_remote_hashes(
-                        remote_connection, need_remote,
-                    )
-                except Exception as e:
-                    logger.warning("bulk remote hash failed, falling back: %s", e)
-                    bulk = {}
+        # Helper: gather paths-needing-hash for one side, then bulk-hash.
+        def _ensure_side_hashed(by_key: dict, conn: Optional[Connection]) -> None:
+            if not intersect_keys:
+                return
+            if conn is None:
+                # Local FS side — compute_local_hash uses the on-disk cache.
                 for k in intersect_keys:
-                    r = remote_by_key[k]
-                    if r.device_type == "remote" and (r.hash is None or len(r.hash) != 64):
-                        h = bulk.get(r.path, "")
-                        # fallback: per-skill if bulk missed
-                        if not h:
-                            h = self._ssh.compute_remote_hash(
-                                remote_connection, r.path,
-                            )
-                        r.hash = h
+                    s = by_key[k]
+                    if s.hash is None or len(s.hash) != 64:
+                        s.hash = self.compute_local_hash(s.path)
+                return
+            # Remote side — one bulk SSH call, fall back per-skill on error.
+            need: list[str] = []
+            for k in intersect_keys:
+                s = by_key[k]
+                if s.hash is None or len(s.hash) != 64:
+                    need.append(s.path)
+            if not need or self._ssh is None:
+                return
+            try:
+                bulk = self._ssh.compute_remote_hashes(conn, need)
+            except Exception as e:
+                logger.warning("bulk remote hash failed, falling back: %s", e)
+                bulk = {}
+            for k in intersect_keys:
+                s = by_key[k]
+                if s.hash is None or len(s.hash) != 64:
+                    h = bulk.get(s.path, "")
+                    if not h:
+                        h = self._ssh.compute_remote_hash(conn, s.path)
+                    s.hash = h
+
+        _ensure_side_hashed(local_by_key, left_conn)
+        _ensure_side_hashed(remote_by_key, right_conn)
 
         # ---- Classification ----------------------------------------------
         for key in sorted(all_keys):
@@ -215,12 +236,15 @@ class SkillHasher:
             r = remote_by_key.get(key)
 
             if l and r:
-                # ensure hashes are populated (fallback path)
+                # Final fallback: ensure both sides have a hash before deciding.
                 if l.hash is None or len(l.hash) != 64:
-                    l.hash = self.compute_local_hash(l.path)
+                    if left_conn and self._ssh:
+                        l.hash = self.compute_remote_hash(left_conn, l.path)
+                    else:
+                        l.hash = self.compute_local_hash(l.path)
                 if r.hash is None or len(r.hash) != 64:
-                    if r.device_type == "remote" and self._ssh:
-                        r.hash = self.compute_remote_hash(remote_connection, r.path)
+                    if right_conn and self._ssh:
+                        r.hash = self.compute_remote_hash(right_conn, r.path)
                     else:
                         r.hash = self.compute_local_hash(r.path)
 

@@ -42,6 +42,54 @@ class SkillScanner:
     def __init__(self, ssh_manager=None):
         self._ssh = ssh_manager
 
+    # ---- Unified entry (PR-1) ----
+
+    def scan(self, source, projects: Optional[list] = None,
+             connection=None) -> list[SkillInfo]:
+        """单一扫描入口：根据 SkillSource 决定调度本地/远程、全局/项目。
+
+        参数：
+          source     —— SkillSource 实例（必填）
+          projects   —— 当前已注册项目（解析 source.project_id 用）
+          connection —— 当 source.is_remote 时必须给出对应 Connection 实体；
+                        通常调用方按 source.connection_name 在 ConnectionModel
+                        里查一次再传进来。
+        """
+        # 延迟导入避免循环依赖
+        from src.models.skill_source import SkillSource
+
+        if not isinstance(source, SkillSource):
+            raise TypeError(f"scan() requires SkillSource, got {type(source)!r}")
+        if not source.is_valid():
+            logger.warning("scan() got invalid SkillSource: %r", source)
+            return []
+
+        projects = projects or []
+
+        if source.is_local:
+            if source.is_global:
+                return self.scan_local_global()
+            proj = next((p for p in projects if p.id == source.project_id), None)
+            if proj is None:
+                logger.warning("scan(): local project %s not found", source.project_id)
+                return []
+            return self.scan_local_project(proj)
+
+        # remote
+        if connection is None:
+            logger.warning(
+                "scan(): remote source requires a Connection but got None "
+                "(source=%r)", source,
+            )
+            return []
+        if source.is_global:
+            return self.scan_remote_global(connection)
+        proj = next((p for p in projects if p.id == source.project_id), None)
+        if proj is None:
+            logger.warning("scan(): remote project %s not found", source.project_id)
+            return []
+        return self.scan_remote_project(connection, proj)
+
     # ---- Local Scanning ----
 
     def scan_local_global(self, tools: Optional[list[str]] = None) -> list[SkillInfo]:

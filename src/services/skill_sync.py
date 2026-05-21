@@ -85,23 +85,21 @@ class SkillSyncService:
     def _make_task(self, skill, target_tool, direction, sync_level,
                    source_project, target_project,
                    source_conn, target_conn) -> Optional[SyncTask]:
-        """Create a single sync task. Returns None if the mapping is N/A."""
+        """Create a single sync task. Returns None if the mapping is N/A.
+
+        Direction-agnostic in the new dual-source model: source/target device
+        is derived from the explicit connection objects, not from the
+        push/pull label. ``direction`` is kept only because the caller still
+        supplies it for status/labeling.
+        """
+        del direction  # device kind is now derived from connections directly.
         source_level, target_level = self._resolve_levels(sync_level)
-        # resolve source and target paths
-        if direction == SYNC_DIRECTION_PUSH:
-            source_path = skill.path
-            source_device = "local" if skill.device_type == "local" else skill.device
-            target_device = target_conn.name if target_conn else "local"
-            target_path = self._resolve_target_path(
-                skill.name, target_tool, sync_level, target_project, target_conn
-            )
-        else:  # pull
-            source_path = skill.path
-            source_device = skill.device
-            target_device = "local"
-            target_path = self._resolve_target_path(
-                skill.name, target_tool, sync_level, target_project, target_conn
-            )
+        source_path = skill.path
+        source_device = source_conn.name if source_conn else "local"
+        target_device = target_conn.name if target_conn else "local"
+        target_path = self._resolve_target_path(
+            skill.name, target_tool, sync_level, target_project, target_conn
+        )
 
         if not target_path:
             return None

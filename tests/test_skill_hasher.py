@@ -210,3 +210,32 @@ class TestSkillHasher:
         (d / "SKILL.md").write_text("aa")
         h3 = SkillHasher.compute_local_hash(str(d))
         assert h3 != h1
+
+    # ---- PR-3: dual-side compare signature ----
+
+    def test_compare_dual_side_kwargs_local_only(self, tmp_path):
+        """Both sides local: passing left_connection=None / right_connection=None
+        works the same as the legacy positional call."""
+        hasher = SkillHasher()
+        f = tmp_path / "skill.md"
+        f.write_text("xyz")
+        left = [_make_skill("s1", path=str(f))]
+        right = [_make_skill("s1", path=str(f))]
+        result = hasher.compare(
+            left, right,
+            left_connection=None,
+            right_connection=None,
+        )
+        assert len(result.synced) == 1
+
+    def test_compare_legacy_remote_connection_still_works(self, tmp_path):
+        """Old callers passing remote_connection= must keep functioning —
+        it now aliases to right_connection internally."""
+        hasher = SkillHasher()
+        f = tmp_path / "skill.md"
+        f.write_text("payload")
+        left = [_make_skill("s1", path=str(f))]
+        right = [_make_skill("s1", path=str(f))]
+        # remote_connection=None still classifies via local FS hash on right.
+        result = hasher.compare(left, right, remote_connection=None)
+        assert len(result.synced) == 1
