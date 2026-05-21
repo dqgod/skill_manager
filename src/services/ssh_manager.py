@@ -224,6 +224,53 @@ class SSHManager:
                 results[p] = h.strip()
         return results
 
+    def scan_skills_in_base(self, conn: Connection, base: str) -> list[dict]:
+        """List all skill directories under a single base path in one SSH call.
+
+        Returns [{name, path, mtime, size}, ...]. Used for both project skill
+        paths and fallback locations where we don't want the per-tool layout
+        of :meth:`scan_skills_global`.
+        """
+        quoted_base = shlex.quote(base)
+        cmd = (
+            f"if [ -d {quoted_base} ]; then "
+            f"  for d in {quoted_base}/*/; do "
+            f"    [ -d \"$d\" ] || continue; "
+            f"    [ -f \"$d/SKILL.md\" ] || continue; "
+            f"    name=$(basename \"$d\"); "
+            f"    mtime=$(stat -c %Y \"$d\" 2>/dev/null || stat -f %m \"$d\"); "
+            f"    size=$(stat -c %s \"$d\" 2>/dev/null || stat -f %z \"$d\"); "
+            f"    printf '%s|%s|%s\\n' \"$name\" \"$mtime\" \"$size\"; "
+            f"  done; "
+            f"fi"
+        )
+        results: list[dict] = []
+        try:
+            output = self._run_command(conn, cmd, timeout=30)
+        except Exception as e:
+            logger.warning("scan_skills_in_base failed for %s: %s", base, e)
+            return results
+        for line in output.splitlines():
+            parts = line.split("|", 2)
+            if len(parts) != 3:
+                continue
+            name, mtime, size = parts
+            try:
+                mtime_f = float(mtime)
+            except ValueError:
+                mtime_f = 0.0
+            try:
+                size_i = int(size)
+            except ValueError:
+                size_i = 0
+            results.append({
+                "name": name,
+                "path": f"{base}/{name}",
+                "mtime": mtime_f,
+                "size": size_i,
+            })
+        return results
+
     def scan_skills_global(self, conn: Connection, remote_home: str,
                            tools: list[str]) -> dict[str, list[dict]]:
         """List all skill directories for the given tools in a single SSH call.

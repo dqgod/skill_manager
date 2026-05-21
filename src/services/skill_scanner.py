@@ -131,6 +131,16 @@ class SkillScanner:
     # ---- Remote Scanning ----
 
     def scan_remote_global(self, conn, tools=None) -> list[SkillInfo]:
+        """远程全局扫描：一次 SSH 把所有工具下的 skill 名字/路径/mtime/size 全拿回。
+
+        快路径走 [ssh_manager.scan_skills_global](src/services/ssh_manager.py)，
+        一次 `find + [ -f SKILL.md ] + stat`，避免对每个 skill 各跑一次
+        SFTP `stat` —— 在 60+ skill / 3 工具 的常规规模下，能把 180 次顺序
+        往返压成 1 次。
+
+        若快路径出错或抓回空列表，自动回退到旧的 SFTP listdir 逐项校验，
+        保证兼容奇怪的远端环境。
+        """
         if self._ssh is None:
             return []
         if tools is None:
@@ -138,18 +148,49 @@ class SkillScanner:
         remote_home = self._ssh.get_remote_home(conn)
         logger.info("Starting remote global scan on %s@%s (home=%s, tools=%s)",
                      conn.username, conn.host, remote_home, tools)
-        # Build remote skill paths — do NOT reuse local GLOBAL_SKILL_PATHS
+
+        # ---- Fast path: 一次性 batch ----
+        try:
+            batch = self._ssh.scan_skills_global(conn, remote_home, tools)
+        except Exception as e:
+            logger.warning("scan_skills_global fast path failed (%s); fallback to SFTP", e)
+            batch = None
+
+        skills: list[SkillInfo] = []
+        if batch is not None:
+            for tool_name in tools:
+                entries = batch.get(tool_name, [])
+                for e in sorted(entries, key=lambda x: x["name"]):
+                    skills.append(SkillInfo(
+                        name=e["name"],
+                        tool=tool_name,
+                        path=e["path"],
+                        level="global",
+                        device=conn.name,
+                        device_type="remote",
+                        size=e.get("size", 0) or 0,
+                        modified_at=datetime.fromtimestamp(
+                            e.get("mtime") or 0
+                        ).strftime("%Y-%m-%d %H:%M") if e.get("mtime") else "",
+                        is_dir=True,
+                    ))
+                logger.info("Remote (batch) %s: %d skills — %s",
+                            tool_name, len(entries), [x["name"] for x in entries])
+            logger.info("Remote global scan done on %s@%s: %d skills found",
+                         conn.username, conn.host, len(skills))
+            return skills
+
+        # ---- Fallback: 旧 SFTP 路径 ----
         remote_skill_paths = {
             "codex": f"{remote_home}/.codex/skills",
             "claude": f"{remote_home}/.claude/skills",
             "cc-switch": f"{remote_home}/.cc-switch/skills",
         }
-        skills: list[SkillInfo] = []
         for tool_name in tools:
             base = remote_skill_paths.get(tool_name)
             if not base:
                 continue
-            logger.info("Remote scan path for %s: %s", tool_name, base)
+            logger.info("Remote scan path for %s (fallback SFTP): %s", tool_name, base)
             skills.extend(self._scan_remote_directory(
                 conn, base, tool=tool_name,
                 level="global", device=conn.name,
@@ -182,13 +223,54 @@ class SkillScanner:
                                level: str, device: str,
                                project_id: Optional[str] = None,
                                project_name: Optional[str] = None) -> list[SkillInfo]:
+        """单目录批量扫描：一次 SSH 拿所有 `*/SKILL.md` 父目录。
+
+        与旧实现的差别：旧实现先 SFTP listdir，再对每个子目录单独跑一次
+        SFTP `stat SKILL.md`（N 次往返）；现在用 [scan_skills_in_base](
+        src/services/ssh_manager.py) 一次 shell `find` 直接拿合法 skill 列表
+        + mtime + size，N 次往返压到 1 次。
+        """
         skills: list[SkillInfo] = []
         logger.debug("Scanning remote path: %s", remote_path)
-        entries = self._ssh.list_dir(conn, remote_path)
-        if not entries:
+
+        # ---- Fast path ----
+        entries = None
+        if hasattr(self._ssh, "scan_skills_in_base"):
+            try:
+                entries = self._ssh.scan_skills_in_base(conn, remote_path)
+            except Exception as e:
+                logger.warning(
+                    "scan_skills_in_base failed for %s (%s); fallback SFTP",
+                    remote_path, e,
+                )
+                entries = None
+
+        if entries is not None:
+            for e in sorted(entries, key=lambda x: x["name"]):
+                skills.append(SkillInfo(
+                    name=e["name"],
+                    tool=tool,
+                    path=e["path"],
+                    level=level,
+                    device=device,
+                    device_type="remote",
+                    project_id=project_id,
+                    project_name=project_name,
+                    size=e.get("size", 0) or 0,
+                    modified_at=datetime.fromtimestamp(
+                        e.get("mtime") or 0
+                    ).strftime("%Y-%m-%d %H:%M") if e.get("mtime") else "",
+                    is_dir=True,
+                ))
+            logger.info("Scanned remote (batch) %s: %d skills — %s",
+                         remote_path, len(skills), [s.name for s in skills])
+            return skills
+
+        # ---- Fallback: 旧 SFTP listdir + 逐项 stat ----
+        sftp_entries = self._ssh.list_dir(conn, remote_path)
+        if not sftp_entries:
             logger.info("Remote path empty or inaccessible: %s", remote_path)
-        for entry in sorted(entries, key=lambda e: e.name):
-            # Only directories containing SKILL.md are valid skills
+        for entry in sorted(sftp_entries, key=lambda e: e.name):
             if not entry.is_dir:
                 continue
             skill_md = f"{entry.path}/SKILL.md"
